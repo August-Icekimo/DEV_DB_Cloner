@@ -1,7 +1,7 @@
 
 # 首次提交 / 版本發佈 v1.0.0 (First Commit / Release v1.0.0)
 
-## 第一次寫標題，不知道寫什麼好 (Title Unk)
+## 第一次寫標題，不知道寫什麼好 (Title Unknown)
 **功能：具備智慧去識別化功能的 HRM 資料庫複製器首次發佈**
 `feat: initial release of HRM DB Replicator with smart anonymization`
 
@@ -50,6 +50,7 @@
   `Pre-configured SENSITIVE_COLUMNS map for EMP_DATA, ADVANCE_BONUS_GRANT, and DEPENDENT_DATA.`
 * 內建大型資料表（如：日誌、出勤紀錄）過濾功能，以優化同步時間。
   `Built-in filtering for large tables (e.g., Logs, Attendance) to optimize sync time.`
+* 沒有`EMP_DATA的資料表，請自行尋找自己專案中類似的資料表，並修改`SENSITIVE_COLUMNS`的值。
 
 ### 環境需求 (Prerequisites)
 * Python 3.x
