@@ -1,0 +1,14 @@
+name: dev_db_cloner
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python>=3.9
+  - unixodbc
+  - pyodbc>=5.0
+  # Prefer conda-forge packages for better compatibility
+  - sqlalchemy>=2.0
+  - pandas>=2.0
+  - tqdm>=4.60
+  - textual>=0.50.0
+  - pip

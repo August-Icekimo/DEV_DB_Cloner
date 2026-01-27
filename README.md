@@ -26,12 +26,25 @@
 ## 安裝 (Installation)
 
 1. 安裝 ODBC Driver 18 (參考 `Install_ODBC_18.md`)
-2. 建立 Python 虛擬環境並安裝套件:
+2. 建立 Python 環境 (Virtual Environment):
+
+   ### 選項 A: 使用 Conda (推薦)
+   這將確保所有相依套件 (包含 ODBC 驅動程式) 的最佳相容性。
+   ```bash
+   conda env create -f environment.yml
+   conda activate dev_db_cloner
+   # 若更新 environment.yml 後需同步環境：
+   # conda env update --file environment.yml --prune
+   ```
+
+   ### 選項 B: 使用 pip / venv (標準方式)
    ```bash
    python -m venv .clone.venv
-   source .clone.venv/bin/activate  # Linux
+   source .clone.venv/bin/activate  # Linux/Mac
+   # .clone.venv\Scripts\activate  # Windows
    pip install -r requirements.txt
    ```
+
 
 ## 使用方式 (Usage)
 
