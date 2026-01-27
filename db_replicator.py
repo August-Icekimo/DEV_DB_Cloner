@@ -455,7 +455,8 @@ def run_replication(args=None):
                         
                         # Fix encoding issues for Chinese characters:
                         # Map all object (string) columns to NVARCHAR explicitly
-                        dtype_map = {c: NVARCHAR for c in chunk.select_dtypes(include=['object']).columns}
+                        # Include both 'object' and 'str' to support Pandas 3.x+ string dtypes
+                        dtype_map = {c: NVARCHAR for c in chunk.select_dtypes(include=['object', 'str']).columns}
 
                         # 寫入目標資料庫
                         chunk.to_sql(table, target_engine, if_exists='append', index=False, dtype=dtype_map)
