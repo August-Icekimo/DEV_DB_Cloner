@@ -124,10 +124,11 @@ from data_anonymizer import (
 # --- Textual TUI App ---
 
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, ListView, ListItem, Label, Button
+from textual.widgets import Header, Footer, ListView, ListItem, Label, Button, Static, TextArea
 from textual.containers import Vertical, Horizontal
 from textual.binding import Binding
 from textual.screen import ModalScreen
+from textual.message import Message
 
 
 class TableItem(ListItem):
@@ -198,46 +199,302 @@ class ConfirmScreen(ModalScreen[bool]):
     def action_submit(self, result: bool) -> None:
         self.dismiss(result)
 
-class TableSelector(App):
-    """Textual App for selecting tables with virtual scrolling"""
+
+class FilterEditorScreen(ModalScreen[str | None]):
+    """Modal screen for editing table filter condition"""
     
     CSS = """
-    ListView {
-        height: 1fr;
-        border: solid green;
+    FilterEditorScreen {
+        align: center middle;
     }
-    .selected {
-        background: $accent;
+    #filter-editor-dialog {
+        width: 80;
+        height: 20;
+        border: thick $background 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+    #filter-editor-dialog Label {
+        margin-bottom: 1;
+    }
+    #filter-input {
+        height: 8;
+        margin-bottom: 1;
+    }
+    #filter-buttons {
+        height: 3;
+        align: center middle;
+    }
+    #filter-buttons Button {
+        margin: 0 2;
     }
     """
 
     BINDINGS = [
-
-        Binding("a", "select_all", "全選/取消全選"),
-        Binding("space", "toggle_current", "選取/取消"),
-        Binding("g", "initiate_confirm", "確認並開始"),
-        ("q", "quit", "離開"),
+        ("escape", "cancel", "取消"),
+        ("ctrl+enter", "save", "儲存"),
     ]
 
+    def __init__(self, table_name: str, current_filter: str) -> None:
+        super().__init__()
+        self.table_name = table_name
+        self.current_filter = current_filter or ""
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label(f"📝 編輯 [{self.table_name}] 的篩選條件 (WHERE clause):"),
+            TextArea(self.current_filter, id="filter-input"),
+            Label("提示: 直接輸入 SQL WHERE 條件，例如: data_year > '114' AND mm > '3'", classes="help"),
+            Horizontal(
+                Button("取消 [Esc]", variant="default", id="cancel"),
+                Button("套用 [Ctrl+Enter]", variant="primary", id="save"),
+                id="filter-buttons"
+            ),
+            id="filter-editor-dialog"
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "save":
+            text_area = self.query_one("#filter-input", TextArea)
+            self.dismiss(text_area.text.strip())
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_save(self) -> None:
+        text_area = self.query_one("#filter-input", TextArea)
+        self.dismiss(text_area.text.strip())
+
+
+class PIIEditorScreen(ModalScreen[dict | None]):
+    """Modal screen for editing PII/sensitive column rules"""
+    
+    CSS = """
+    PIIEditorScreen {
+        align: center middle;
+    }
+    #pii-editor-dialog {
+        width: 90;
+        height: 25;
+        border: thick $background 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+    #pii-editor-dialog Label {
+        margin-bottom: 1;
+    }
+    #pii-input {
+        height: 12;
+        margin-bottom: 1;
+    }
+    .help {
+        color: $text-muted;
+    }
+    #pii-buttons {
+        height: 3;
+        align: center middle;
+    }
+    #pii-buttons Button {
+        margin: 0 2;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "取消"),
+        ("ctrl+enter", "save", "儲存"),
+    ]
+
+    def __init__(self, table_name: str, current_rules: dict) -> None:
+        super().__init__()
+        self.table_name = table_name
+        # Convert rules to JSON for editing
+        self.rules_json = json.dumps(current_rules, ensure_ascii=False, indent=2) if current_rules else "{}"
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label(f"🔒 編輯 [{self.table_name}] 的 PII 去敏化規則 (JSON 格式):"),
+            TextArea(self.rules_json, id="pii-input"),
+            Label('格式: {"欄位名": ["函數名", "seed欄位或null"], ...}', classes="help"),
+            Label("可用函數: obfuscate_name, anonymize_id, obfuscate_address, obfuscate_phone, clear_content", classes="help"),
+            Horizontal(
+                Button("取消 [Esc]", variant="default", id="cancel"),
+                Button("套用 [Ctrl+Enter]", variant="primary", id="save"),
+                id="pii-buttons"
+            ),
+            id="pii-editor-dialog"
+        )
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(None)
+        elif event.button.id == "save":
+            self._try_save()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_save(self) -> None:
+        self._try_save()
+
+    def _try_save(self) -> None:
+        text_area = self.query_one("#pii-input", TextArea)
+        text = text_area.text.strip()
+        if not text or text == "{}":
+            self.dismiss({})
+            return
+        try:
+            rules = json.loads(text)
+            # Convert list format to tuple format expected by the system
+            converted = {}
+            for col, val in rules.items():
+                if isinstance(val, list) and len(val) == 2:
+                    converted[col] = (val[0], val[1])
+                else:
+                    converted[col] = val
+            self.dismiss(converted)
+        except json.JSONDecodeError as e:
+            self.notify(f"❌ JSON 格式錯誤: {e}", severity="error")
+
+class TableSelector(App):
+    """Textual App for selecting tables with 3-column layout"""
+    
+    CSS = """
+    #main-container {
+        height: 1fr;
+    }
+    #columns-container {
+        height: 1fr;
+    }
+    .column {
+        border: solid $primary;
+        padding: 0 1;
+    }
+    #tables-column {
+        width: 2fr;
+    }
+    #filters-column {
+        width: 1.5fr;
+    }
+    #pii-column {
+        width: 1.5fr;
+    }
+    .column-header {
+        background: $accent;
+        text-style: bold;
+        padding: 0 1;
+        margin-bottom: 1;
+    }
+    #table-list {
+        height: 1fr;
+        border: none;
+    }
+    #filter-display, #pii-display {
+        height: 1fr;
+        overflow-y: auto;
+        padding: 0 1;
+    }
+    .info {
+        padding: 1;
+    }
+    .has-rule {
+        color: $success;
+    }
+    .no-rule {
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        Binding("a", "select_all", "全選/取消"),
+        Binding("space", "toggle_current", "選取"),
+        Binding("f", "edit_filter", "編輯篩選[F]"),
+        Binding("p", "edit_pii", "編輯PII[P]"),
+        Binding("s", "save_configs", "存檔[S]"),
+        Binding("g", "initiate_confirm", "確認開始[G]"),
+        ("q", "quit", "離開"),
+    ]
 
     def __init__(self, table_names: List[str]):
         super().__init__()
         self.table_names = table_names
         self.selected_tables = []
         self.all_selected = False
+        self.current_table: Optional[str] = None
+        self.configs_modified = False
 
     def on_mount(self) -> None:
         self.query_one("#table-list", ListView).focus()
+        # Initialize display with first table if available
+        if self.table_names:
+            self.current_table = self.table_names[0]
+            self._update_side_panels()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Label(f"偵測到 {len(self.table_names)} 個資料表。請使用上下鍵移動，滑鼠點擊或空白鍵選取，按 G 確認。", classes="info")
+        yield Label(
+            f"偵測到 {len(self.table_names)} 個資料表。[Space]選取 [F]編輯篩選 [P]編輯PII [S]存檔 [G]開始",
+            classes="info"
+        )
         
-        # 使用 ListView 實現虛擬滾動
-        items = [TableItem(name) for name in self.table_names]
-        yield ListView(*items, id="table-list")
+        with Horizontal(id="columns-container"):
+            # Column 1: Tables
+            with Vertical(id="tables-column", classes="column"):
+                yield Label("📋 Tables", classes="column-header")
+                items = [TableItem(name) for name in self.table_names]
+                yield ListView(*items, id="table-list")
+            
+            # Column 2: TABLE_FILTERS
+            with Vertical(id="filters-column", classes="column"):
+                yield Label("🔍 TABLE_FILTERS [F]", classes="column-header")
+                yield Static("選擇資料表以查看篩選條件", id="filter-display", classes="no-rule")
+            
+            # Column 3: SENSITIVE_COLUMNS
+            with Vertical(id="pii-column", classes="column"):
+                yield Label("🔒 SENSITIVE_COLUMNS [P]", classes="column-header")
+                yield Static("選擇資料表以查看 PII 規則", id="pii-display", classes="no-rule")
         
         yield Footer()
+
+    def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
+        """Update side panels when highlighted item changes"""
+        if event.item and isinstance(event.item, TableItem):
+            self.current_table = event.item.table_name
+            self._update_side_panels()
+
+    def _update_side_panels(self) -> None:
+        """Update filter and PII display panels for current table"""
+        if not self.current_table:
+            return
+        
+        # Update Filter Display
+        filter_display = self.query_one("#filter-display", Static)
+        filter_rule = LARGE_TABLE_FILTERS.get(self.current_table)
+        if filter_rule:
+            filter_display.update(f"✅ WHERE:\n{filter_rule}")
+            filter_display.remove_class("no-rule")
+            filter_display.add_class("has-rule")
+        else:
+            filter_display.update("無篩選條件\n\n按 \[F] 新增")
+            filter_display.remove_class("has-rule")
+            filter_display.add_class("no-rule")
+        
+        # Update PII Display
+        pii_display = self.query_one("#pii-display", Static)
+        pii_rules = SENSITIVE_COLUMNS.get(self.current_table)
+        if pii_rules:
+            lines = ["✅ 去敏化規則:"]
+            for col, (func_name, seed_col) in pii_rules.items():
+                seed_str = f" (seed: {seed_col})" if seed_col else ""
+                lines.append(f"  • {col}: {func_name}{seed_str}")
+            pii_display.update("\n".join(lines))
+            pii_display.remove_class("no-rule")
+            pii_display.add_class("has-rule")
+        else:
+            pii_display.update("無去敏化規則\n\n按 \[P] 新增")
+            pii_display.remove_class("has-rule")
+            pii_display.add_class("no-rule")
 
     def action_toggle_current(self) -> None:
         list_view = self.query_one("#table-list", ListView)
@@ -249,13 +506,80 @@ class TableSelector(App):
         list_view = self.query_one("#table-list", ListView)
         target_state = self.all_selected
         
-        # Optimize: Avoid re-rendering if possible, but basic update is fine for 200 items
         for item in list_view.children:
             if isinstance(item, TableItem):
                 if item.checked != target_state:
                     item.toggle()
         
         self.notify(f"{'已全選' if self.all_selected else '已取消全選'}")
+
+    def action_edit_filter(self) -> None:
+        """Open filter editor for current table"""
+        if not self.current_table:
+            self.notify("請先選擇資料表", severity="warning")
+            return
+        
+        current_filter = LARGE_TABLE_FILTERS.get(self.current_table, "")
+        
+        def on_filter_result(result: str | None) -> None:
+            if result is not None:
+                if result:
+                    LARGE_TABLE_FILTERS[self.current_table] = result
+                    self.notify(f"✅ 已更新 {self.current_table} 的篩選條件")
+                else:
+                    # Empty string means remove the filter
+                    if self.current_table in LARGE_TABLE_FILTERS:
+                        del LARGE_TABLE_FILTERS[self.current_table]
+                        self.notify(f"🗑️ 已移除 {self.current_table} 的篩選條件")
+                self.configs_modified = True
+                self._update_side_panels()
+        
+        self.push_screen(FilterEditorScreen(self.current_table, current_filter), on_filter_result)
+
+    def action_edit_pii(self) -> None:
+        """Open PII editor for current table"""
+        if not self.current_table:
+            self.notify("請先選擇資料表", severity="warning")
+            return
+        
+        current_rules = SENSITIVE_COLUMNS.get(self.current_table, {})
+        
+        def on_pii_result(result: dict | None) -> None:
+            if result is not None:
+                if result:
+                    SENSITIVE_COLUMNS[self.current_table] = result
+                    self.notify(f"✅ 已更新 {self.current_table} 的 PII 規則")
+                else:
+                    # Empty dict means remove the rules
+                    if self.current_table in SENSITIVE_COLUMNS:
+                        del SENSITIVE_COLUMNS[self.current_table]
+                        self.notify(f"🗑️ 已移除 {self.current_table} 的 PII 規則")
+                self.configs_modified = True
+                self._update_side_panels()
+        
+        self.push_screen(PIIEditorScreen(self.current_table, current_rules), on_pii_result)
+
+    def action_save_configs(self) -> None:
+        """Save modified configs to JSON files"""
+        try:
+            # Save LARGE_TABLE_FILTERS
+            with open('large_table_filters.json', 'w', encoding='utf-8') as f:
+                json.dump(LARGE_TABLE_FILTERS, f, ensure_ascii=False, indent=2)
+            
+            # Save SENSITIVE_COLUMNS - convert tuples to lists for JSON
+            sc_json = {}
+            for table, rules in SENSITIVE_COLUMNS.items():
+                sc_json[table] = {}
+                for col, (func_name, seed_col) in rules.items():
+                    sc_json[table][col] = [func_name, seed_col]
+            
+            with open('sensitive_columns.json', 'w', encoding='utf-8') as f:
+                json.dump(sc_json, f, ensure_ascii=False, indent=2)
+            
+            self.configs_modified = False
+            self.notify("✅ 設定已儲存至 large_table_filters.json 和 sensitive_columns.json")
+        except Exception as e:
+            self.notify(f"❌ 儲存失敗: {e}", severity="error")
 
     def action_initiate_confirm(self) -> None:
         list_view = self.query_one("#table-list", ListView)
@@ -268,7 +592,12 @@ class TableSelector(App):
             self.notify("請至少選擇一個資料表！", severity="error")
             return
 
-        msg = f"已選擇 {len(selected_temp)} 個資料表。\n\n確定要開始嗎？"
+        # Warn if configs modified but not saved
+        warning = ""
+        if self.configs_modified:
+            warning = "\n\n⚠️ 有未儲存的設定變更！"
+
+        msg = f"已選擇 {len(selected_temp)} 個資料表。{warning}\n\n確定要開始嗎？"
         
         def check_confirm(is_confirmed: bool) -> None:
             if is_confirmed:
