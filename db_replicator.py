@@ -434,25 +434,25 @@ class TableSelector(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Label(
-            f"偵測到 {len(self.table_names)} 個資料表。[Space]選取 [F]編輯篩選 [P]編輯PII [S]存檔 [G]開始",
+            f"偵測到 {len(self.table_names)} 個資料表。Space_選取 F_編輯篩選 P_編輯PII S_存檔 G_開始",
             classes="info"
         )
         
         with Horizontal(id="columns-container"):
             # Column 1: Tables
             with Vertical(id="tables-column", classes="column"):
-                yield Label("📋 Tables", classes="column-header")
+                yield Label("📋 TABLES", classes="column-header")
                 items = [TableItem(name) for name in self.table_names]
                 yield ListView(*items, id="table-list")
             
             # Column 2: TABLE_FILTERS
             with Vertical(id="filters-column", classes="column"):
-                yield Label("🔍 TABLE_FILTERS [F]", classes="column-header")
+                yield Label("🔍 DATA_FILTERS >F", classes="column-header")
                 yield Static("選擇資料表以查看篩選條件", id="filter-display", classes="no-rule")
             
             # Column 3: SENSITIVE_COLUMNS
             with Vertical(id="pii-column", classes="column"):
-                yield Label("🔒 SENSITIVE_COLUMNS [P]", classes="column-header")
+                yield Label("🔒 PII COLUMNS >P", classes="column-header")
                 yield Static("選擇資料表以查看 PII 規則", id="pii-display", classes="no-rule")
         
         yield Footer()
@@ -476,7 +476,7 @@ class TableSelector(App):
             filter_display.remove_class("no-rule")
             filter_display.add_class("has-rule")
         else:
-            filter_display.update("無篩選條件\n\n按 \[F] 新增")
+            filter_display.update("無篩選條件\n\n按 F 新增")
             filter_display.remove_class("has-rule")
             filter_display.add_class("no-rule")
         
@@ -492,7 +492,7 @@ class TableSelector(App):
             pii_display.remove_class("no-rule")
             pii_display.add_class("has-rule")
         else:
-            pii_display.update("無去敏化規則\n\n按 \[P] 新增")
+            pii_display.update("無去敏化規則\n\n按 P 新增")
             pii_display.remove_class("has-rule")
             pii_display.add_class("no-rule")
 
