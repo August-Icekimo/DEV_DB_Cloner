@@ -1,0 +1,5 @@
+# MAC檔案
+*.pyc
+*.log
+*.json
+__pycache__
