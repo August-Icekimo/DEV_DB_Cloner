@@ -3,3 +3,11 @@
 *.log
 *.json
 __pycache__
+# PC檔案
+.*venv/
+.vscode/
+bin/
+lib/
+lib64/
+build/
+tmp/

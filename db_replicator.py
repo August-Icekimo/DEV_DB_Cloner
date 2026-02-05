@@ -125,7 +125,7 @@ from data_anonymizer import (
 
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, ListView, ListItem, Label, Button, Static, TextArea
-from textual.containers import Vertical, Horizontal
+from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.message import Message
@@ -384,16 +384,35 @@ class TableSelector(App):
         background: $accent;
         text-style: bold;
         padding: 0 1;
-        margin-bottom: 1;
     }
     #table-list {
         height: 1fr;
         border: none;
     }
-    #filter-display, #pii-display {
+    /* Split panel styles */
+    .panel-upper {
         height: 1fr;
-        overflow-y: auto;
+        border-bottom: solid $primary;
         padding: 0 1;
+        overflow-y: auto;
+    }
+    .panel-lower {
+        height: 1fr;
+        padding: 0;
+    }
+    .panel-lower-header {
+        background: $accent-darken-2;
+        text-style: bold;
+        padding: 0 1;
+        height: auto;
+    }
+    .metadata-scroll {
+        height: 1fr;
+        overflow-y: scroll;
+        padding: 0 1;
+    }
+    .metadata-scroll:focus {
+        border: solid $accent;
     }
     .info {
         padding: 1;
@@ -404,6 +423,9 @@ class TableSelector(App):
     .no-rule {
         color: $text-muted;
     }
+    .pk-list, .column-list {
+        color: $text;
+    }
     """
 
     BINDINGS = [
@@ -413,16 +435,23 @@ class TableSelector(App):
         Binding("p", "edit_pii", "編輯PII[P]"),
         Binding("s", "save_configs", "存檔[S]"),
         Binding("g", "initiate_confirm", "確認開始[G]"),
+        Binding("tab", "focus_next", "下個區域", show=False),
+        Binding("shift+tab", "focus_previous", "上個區域", show=False),
         ("q", "quit", "離開"),
     ]
 
-    def __init__(self, table_names: List[str]):
+    def __init__(self, table_names: List[str], inspector=None):
         super().__init__()
         self.table_names = table_names
         self.selected_tables = []
         self.all_selected = False
         self.current_table: Optional[str] = None
         self.configs_modified = False
+        # Database inspector for metadata loading
+        self.inspector = inspector
+        # Lazy-loaded metadata caches
+        self.table_columns_cache: Dict[str, List[str]] = {}
+        self.table_pk_cache: Dict[str, List[str]] = {}
 
     def on_mount(self) -> None:
         self.query_one("#table-list", ListView).focus()
@@ -434,7 +463,7 @@ class TableSelector(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Label(
-            f"偵測到 {len(self.table_names)} 個資料表。Space_選取 F_編輯篩選 P_編輯PII S_存檔 G_開始",
+            f"偵測到 {len(self.table_names)} 個資料表。Space_選取 F_編輯篩選 P_編輯PII S_存檔 G_開始 TAB_切換區域",
             classes="info"
         )
         
@@ -445,15 +474,29 @@ class TableSelector(App):
                 items = [TableItem(name) for name in self.table_names]
                 yield ListView(*items, id="table-list")
             
-            # Column 2: TABLE_FILTERS
+            # Column 2: DATA_FILTERS - split upper/lower
             with Vertical(id="filters-column", classes="column"):
                 yield Label("🔍 DATA_FILTERS >F", classes="column-header")
-                yield Static("選擇資料表以查看篩選條件", id="filter-display", classes="no-rule")
+                # Upper: Current filter rules
+                with Vertical(classes="panel-upper"):
+                    yield Static("選擇資料表以查看篩選條件", id="filter-display", classes="no-rule")
+                # Lower: Primary Keys
+                with Vertical(classes="panel-lower"):
+                    yield Label("🔑 Primary Keys", classes="panel-lower-header")
+                    with ScrollableContainer(id="pk-scroll", classes="metadata-scroll"):
+                        yield Static("", id="pk-list", classes="pk-list")
             
-            # Column 3: SENSITIVE_COLUMNS
+            # Column 3: PII COLUMNS - split upper/lower
             with Vertical(id="pii-column", classes="column"):
                 yield Label("🔒 PII COLUMNS >P", classes="column-header")
-                yield Static("選擇資料表以查看 PII 規則", id="pii-display", classes="no-rule")
+                # Upper: Current PII rules
+                with Vertical(classes="panel-upper"):
+                    yield Static("選擇資料表以查看 PII 規則", id="pii-display", classes="no-rule")
+                # Lower: All Columns
+                with Vertical(classes="panel-lower"):
+                    yield Label("📋 All Columns", classes="panel-lower-header")
+                    with ScrollableContainer(id="col-scroll", classes="metadata-scroll"):
+                        yield Static("", id="column-list", classes="column-list")
         
         yield Footer()
 
@@ -463,12 +506,38 @@ class TableSelector(App):
             self.current_table = event.item.table_name
             self._update_side_panels()
 
+    def _load_table_metadata(self, table_name: str) -> None:
+        """Lazy load columns and primary keys for the selected table"""
+        if table_name in self.table_columns_cache:
+            return  # Already cached
+        
+        if self.inspector:
+            try:
+                # Get columns
+                columns = self.inspector.get_columns(table_name)
+                self.table_columns_cache[table_name] = [c['name'] for c in columns]
+                
+                # Get primary keys
+                pk_constraint = self.inspector.get_pk_constraint(table_name)
+                self.table_pk_cache[table_name] = pk_constraint.get('constrained_columns', [])
+            except Exception as e:
+                self.notify(f"⚠️ 無法載入 {table_name} 元數據: {e}", severity="warning")
+                self.table_columns_cache[table_name] = []
+                self.table_pk_cache[table_name] = []
+        else:
+            # Demo mode - generate mock data
+            self.table_columns_cache[table_name] = [f"column_{i}" for i in range(1, 16)]
+            self.table_pk_cache[table_name] = ["id", "seq_no"]
+
     def _update_side_panels(self) -> None:
         """Update filter and PII display panels for current table"""
         if not self.current_table:
             return
         
-        # Update Filter Display
+        # Load table metadata if not cached
+        self._load_table_metadata(self.current_table)
+        
+        # Update Filter Display (upper section)
         filter_display = self.query_one("#filter-display", Static)
         filter_rule = LARGE_TABLE_FILTERS.get(self.current_table)
         if filter_rule:
@@ -480,7 +549,16 @@ class TableSelector(App):
             filter_display.remove_class("has-rule")
             filter_display.add_class("no-rule")
         
-        # Update PII Display
+        # Update Primary Keys Display (lower section)
+        pk_list = self.query_one("#pk-list", Static)
+        pks = self.table_pk_cache.get(self.current_table, [])
+        if pks:
+            pk_text = "\n".join([f"  • {pk}" for pk in pks])
+            pk_list.update(pk_text)
+        else:
+            pk_list.update("  (無主鍵)")
+        
+        # Update PII Display (upper section)
         pii_display = self.query_one("#pii-display", Static)
         pii_rules = SENSITIVE_COLUMNS.get(self.current_table)
         if pii_rules:
@@ -495,6 +573,15 @@ class TableSelector(App):
             pii_display.update("無去敏化規則\n\n按 P 新增")
             pii_display.remove_class("has-rule")
             pii_display.add_class("no-rule")
+        
+        # Update All Columns Display (lower section)
+        column_list = self.query_one("#column-list", Static)
+        columns = self.table_columns_cache.get(self.current_table, [])
+        if columns:
+            col_text = "\n".join([f"  • {col}" for col in columns])
+            column_list.update(col_text)
+        else:
+            column_list.update("  (無欄位資訊)")
 
     def action_toggle_current(self) -> None:
         list_view = self.query_one("#table-list", ListView)
@@ -737,14 +824,15 @@ def run_replication(args=None):
         mock_tables.extend(LARGE_TABLE_FILTERS.keys()) 
         mock_tables.extend(SENSITIVE_COLUMNS.keys())
         all_tables = sorted(list(set(mock_tables)))
+        insp = None  # No inspector in demo mode
     else:
         # 從真實資料庫取得資料表清單
         logger.info("正在讀取資料表清單...")
         insp = inspect(source_engine)
         all_tables = sorted(insp.get_table_names())
 
-    # 2. 啟動 TUI 選擇
-    app = TableSelector(all_tables)
+    # 2. 啟動 TUI 選擇 (pass inspector for metadata loading)
+    app = TableSelector(all_tables, inspector=insp)
     selected_tables = app.run()
 
     if not selected_tables:
