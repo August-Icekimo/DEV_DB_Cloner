@@ -35,56 +35,10 @@ console_handler.setFormatter(console_formatter)
 logger.addHandler(file_handler)
 logger.addHandler(console_handler)
 
-# --- Configuration Section ---
-
-# Helper to load sideload configs
-def load_sideload_config(name: str, default_val: dict) -> dict:
-    filename = f"{name.lower()}.json"
-    if os.path.exists(filename):
-        try:
-            with open(filename, 'r', encoding='utf-8') as f:
-                logger.info(f"Loading external config: {filename}")
-                return json.load(f)
-        except Exception as e:
-            logger.warning(f"⚠️ Error loading {filename}: {e}. Using compiled-in defaults.")
-    return default_val
-
-# 大型資料表篩選 - 支援多條件
-# 格式: 'TABLE_NAME': "condition1 AND condition2"
-DEFAULT_LARGE_TABLE_FILTERS = {
-    'WORK_TIME_REC': "data_year > '114' AND mm > '3'",
-    'SALARY_DETAIL': "data_year >= '113' AND data_year <= '114'",
-    'SYSTEM_LOG': "log_year > '113' AND log_mm >= '06'",
-    'ATTENDANCE_REC': "data_year = '114'",
-}
-LARGE_TABLE_FILTERS = load_sideload_config('LARGE_TABLE_FILTERS', DEFAULT_LARGE_TABLE_FILTERS)
-
-# 需要去識別化的欄位對應
-# 格式: 'TABLE_NAME': {'column': ('function_name', 'seed_column_or_None')}
-DEFAULT_SENSITIVE_COLUMNS = {
-    'EMP_DATA': {
-        'emp_name': ('obfuscate_name', 'emp_no'),
-        'emp_ename': ('clear_content', None),
-        'license_id': ('anonymize_id', None),
-        'address': ('obfuscate_address', 'emp_no'),
-        'home_addr': ('obfuscate_address', 'emp_no'),
-        'emer_member': ('obfuscate_spouse_name', 'emp_no'),
-        'tel': ('obfuscate_phone', 'emp_no'),
-        'mobile': ('obfuscate_phone', 'emp_no'),
-        'emer_tel': ('obfuscate_phone', 'emp_no'),
-        'emer_mobile': ('obfuscate_phone', 'emp_no'),
-        'zap_address': ('obfuscate_address', 'emp_no'),
-        'con_address': ('obfuscate_address', 'emp_no'),
-    },
-    'ADVANCE_BONUS_GRANT': {
-        'emp_name': ('obfuscate_name', 'emp_no'),
-    },
-    'DEPENDENT_DATA': {
-        'dep_name': ('obfuscate_name', 'emp_no'),
-        'dep_id_no': ('anonymize_id', None),
-    }
-}
-SENSITIVE_COLUMNS = load_sideload_config('SENSITIVE_COLUMNS', DEFAULT_SENSITIVE_COLUMNS)
+# --- Legacy Config Section (Replaced by ConfigManager) ---
+# globals used by execution logic, populated by ConfigManager at runtime
+LARGE_TABLE_FILTERS = {}
+SENSITIVE_COLUMNS = {}
 
 
 REQUIRED_PACKAGES = {
@@ -129,9 +83,203 @@ from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual.binding import Binding
 from textual.screen import ModalScreen
 from textual.message import Message
+from textual.containers import Grid
+from config_manager import ConfigManager
+
+# Initialize Config Manager (runs migration if needed)
+config_mgr = ConfigManager()
+config_mgr.migrate_json_if_needed()
 
 
-class TableItem(ListItem):
+# --- TUI Screens ---
+
+class ProjectSettingsScreen(ModalScreen[bool]):
+    """Modal screen for editing Project Settings (Name Source)"""
+    
+    CSS = """
+    ProjectSettingsScreen {
+        align: center middle;
+    }
+    #settings-dialog {
+        width: 80;
+        height: 22;
+        border: thick $background 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+    .field-label {
+        margin-top: 1;
+        text-style: bold;
+    }
+    #source-type-buttons {
+        height: 3;
+        margin-bottom: 1;
+    }
+    #source-type-buttons Button {
+        margin-right: 2;
+    }
+    .selected-type {
+        background: $accent;
+        color: $text;
+    }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "離開"),
+    ]
+
+    def __init__(self, project_id: int) -> None:
+        super().__init__()
+        self.project_id = project_id
+        self.project = config_mgr.get_project_by_id(project_id)
+        self.current_type = self.project.name_source_type
+        self.current_value = self.project.name_source_value or ""
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label(f"⚙️ 專案設定: {self.project.name}", classes="field-label"),
+            
+            Label("姓名來源類型 (Name Source Type):", classes="field-label"),
+            Horizontal(
+                Button("預設 (Default)", id="type-default"),
+                Button("資料庫 (Database)", id="type-db"),
+                Button("檔案 (File)", id="type-file"),
+                id="source-type-buttons"
+            ),
+            
+            Label("來源設定值 (Value):", classes="field-label"),
+            Label("  • DB: 'Table.Column' (e.g. USERS.full_name)\n  • File: 'path/to/names.json'", classes="help"),
+            TextArea(self.current_value, id="source-value-input"),
+            
+            Label(" ", classes="field-label"), # Spacer
+            Horizontal(
+                Button("取消 [Esc]", variant="default", id="cancel"),
+                Button("儲存設定", variant="primary", id="save"),
+                classes="dialog-buttons"
+            ),
+            id="settings-dialog"
+        )
+
+    def on_mount(self) -> None:
+        self._highlight_type_button()
+
+    def _highlight_type_button(self):
+        for type_key in ["DEFAULT", "DB", "FILE"]:
+            btn = self.query_one(f"#type-{type_key.lower()}", Button)
+            if self.current_type == type_key:
+                btn.variant = "success"
+            else:
+                btn.variant = "default"
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "cancel":
+            self.dismiss(False)
+        elif event.button.id == "save":
+            val = self.query_one("#source-value-input", TextArea).text.strip()
+            config_mgr.update_project_settings(
+                self.project_id, 
+                self.project.name, 
+                self.project.description,
+                self.current_type,
+                val
+            )
+            self.notify("✅ 設定已更新")
+            self.dismiss(True)
+        elif event.button.id.startswith("type-"):
+            new_type = event.button.id.split("-")[1].upper()
+            self.current_type = new_type
+            self._highlight_type_button()
+    
+    def action_cancel(self):
+        self.dismiss(False)
+
+
+class NewProjectScreen(ModalScreen[str]):
+    CSS = """
+    NewProjectScreen { align: center middle; }
+    #new-proj-dialog { width: 60; height: 10; border: thick $background 80%; background: $surface; padding: 1 2; }
+    """
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label("建立新專案 (Project Name):"),
+            TextArea("", id="new-proj-name"),
+            Horizontal(Button("取消", id="cancel"), Button("建立", variant="primary", id="create")),
+            id="new-proj-dialog"
+        )
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "create":
+            name = self.query_one("#new-proj-name", TextArea).text.strip()
+            if name: self.dismiss(name)
+        else:
+            self.dismiss(None)
+
+
+class ProjectSelector(App):
+    """App to select or manage projects"""
+    CSS = """
+    Screen { align: center middle; }
+    #main-container { width: 60; height: 30; border: thick $primary; background: $surface; padding: 1; }
+    #proj-list { height: 1fr; border: solid $secondary; margin: 1 0; }
+    #buttons { height: 3; align: center middle; }
+    Button { margin: 0 1; }
+    """
+
+    def on_mount(self):
+        self.refresh_list()
+
+    def refresh_list(self):
+        self.projects = config_mgr.get_all_projects()
+        list_view = self.query_one("#proj-list", ListView)
+        list_view.clear()
+        for p in self.projects:
+            list_view.append(ListItem(Label(f"📁 {p.name}")))
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label("🗄️ 專案管理 (Project Manager)", classes="title"),
+            ListView(id="proj-list"),
+            Horizontal(
+                Button("建立新專案", variant="success", id="new"),
+                Button("開啟專案", variant="primary", id="open"),
+                Button("刪除專案", variant="error", id="delete"),
+                id="buttons"
+            ),
+            id="main-container"
+        )
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "new":
+            def on_new(name):
+                if name:
+                    try:
+                        config_mgr.create_project(name)
+                        self.refresh_list()
+                    except Exception as e:
+                        self.notify(f"Error: {e}", severity="error")
+            self.push_screen(NewProjectScreen(), on_new)
+        
+        elif event.button.id == "open":
+            self._open_selected()
+        
+        elif event.button.id == "delete":
+            list_view = self.query_one("#proj-list", ListView)
+            if list_view.index is not None:
+                p = self.projects[list_view.index]
+                if p.name == "Default":
+                    self.notify("無法刪除預設專案", severity="error")
+                    return
+                config_mgr.delete_project(p.id)
+                self.refresh_list()
+
+    def _open_selected(self):
+        list_view = self.query_one("#proj-list", ListView)
+        if list_view.index is not None:
+            project = self.projects[list_view.index]
+            self.exit(project.id)
+        else:
+            self.notify("請選擇一個專案")
+
+
     """Custom ListItem with checkbox-like behavior"""
     def __init__(self, name: str) -> None:
         super().__init__()
@@ -429,33 +577,38 @@ class TableSelector(App):
     """
 
     BINDINGS = [
-        Binding("a", "select_all", "全選/取消"),
-        Binding("space", "toggle_current", "選取"),
-        Binding("f", "edit_filter", "編輯篩選[F]"),
-        Binding("p", "edit_pii", "編輯PII[P]"),
-        Binding("s", "save_configs", "存檔[S]"),
-        Binding("g", "initiate_confirm", "確認開始[G]"),
+        ("a", "select_all", "全選/取消"),
+        ("space", "toggle_current", "選取"),
+        ("f", "edit_filter", "編輯篩選[F]"),
+        ("p", "edit_pii", "編輯PII[P]"),
+        Binding("o", "project_settings", "專案設定[O]"), # New binding
+        ("s", "save_configs", "存檔[S]"),
+        ("g", "initiate_confirm", "確認開始[G]"),
         Binding("tab", "focus_next", "下個區域", show=False),
         Binding("shift+tab", "focus_previous", "上個區域", show=False),
         ("q", "quit", "離開"),
     ]
 
-    def __init__(self, table_names: List[str], inspector=None):
+    def __init__(self, project_id: int, all_table_names: List[str], inspector=None):
         super().__init__()
-        self.table_names = table_names
-        self.selected_tables = []
+        self.project_id = project_id
+        self.project = config_mgr.get_project_by_id(project_id)
+        self.table_names = all_table_names
         self.all_selected = False
         self.current_table: Optional[str] = None
         self.configs_modified = False
-        # Database inspector for metadata loading
         self.inspector = inspector
-        # Lazy-loaded metadata caches
         self.table_columns_cache: Dict[str, List[str]] = {}
         self.table_pk_cache: Dict[str, List[str]] = {}
 
+        # Load Config from DB
+        selected_set, self.filters, self.pii_rules, _ = config_mgr.get_project_config(project_id)
+        
+        # Determine initial checked state
+        self.initial_checked = selected_set
+
     def on_mount(self) -> None:
         self.query_one("#table-list", ListView).focus()
-        # Initialize display with first table if available
         if self.table_names:
             self.current_table = self.table_names[0]
             self._update_side_panels()
@@ -463,7 +616,7 @@ class TableSelector(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         yield Label(
-            f"偵測到 {len(self.table_names)} 個資料表。Space_選取 F_編輯篩選 P_編輯PII S_存檔 G_開始 TAB_切換區域",
+            f"專案: {self.project.name} | Space_選取 F_篩選 P_PII O_設定 S_存檔 G_開始",
             classes="info"
         )
         
@@ -471,28 +624,30 @@ class TableSelector(App):
             # Column 1: Tables
             with Vertical(id="tables-column", classes="column"):
                 yield Label("📋 TABLES", classes="column-header")
-                items = [TableItem(name) for name in self.table_names]
+                items = []
+                for name in self.table_names:
+                    item = TableItem(name)
+                    if name in self.initial_checked:
+                        item.checked = True
+                        item.label.update(f"[x] {name}")
+                    items.append(item)
                 yield ListView(*items, id="table-list")
             
-            # Column 2: DATA_FILTERS - split upper/lower
+            # Column 2: DATA_FILTERS
             with Vertical(id="filters-column", classes="column"):
                 yield Label("🔍 DATA_FILTERS >F", classes="column-header")
-                # Upper: Current filter rules
                 with Vertical(classes="panel-upper"):
                     yield Static("選擇資料表以查看篩選條件", id="filter-display", classes="no-rule")
-                # Lower: Primary Keys
                 with Vertical(classes="panel-lower"):
                     yield Label("🔑 Primary Keys", classes="panel-lower-header")
                     with ScrollableContainer(id="pk-scroll", classes="metadata-scroll"):
                         yield Static("", id="pk-list", classes="pk-list")
             
-            # Column 3: PII COLUMNS - split upper/lower
+            # Column 3: PII COLUMNS
             with Vertical(id="pii-column", classes="column"):
                 yield Label("🔒 PII COLUMNS >P", classes="column-header")
-                # Upper: Current PII rules
                 with Vertical(classes="panel-upper"):
                     yield Static("選擇資料表以查看 PII 規則", id="pii-display", classes="no-rule")
-                # Lower: All Columns
                 with Vertical(classes="panel-lower"):
                     yield Label("📋 All Columns", classes="panel-lower-header")
                     with ScrollableContainer(id="col-scroll", classes="metadata-scroll"):
@@ -507,17 +662,13 @@ class TableSelector(App):
             self._update_side_panels()
 
     def _load_table_metadata(self, table_name: str) -> None:
-        """Lazy load columns and primary keys for the selected table"""
         if table_name in self.table_columns_cache:
-            return  # Already cached
+            return
         
         if self.inspector:
             try:
-                # Get columns
                 columns = self.inspector.get_columns(table_name)
                 self.table_columns_cache[table_name] = [c['name'] for c in columns]
-                
-                # Get primary keys
                 pk_constraint = self.inspector.get_pk_constraint(table_name)
                 self.table_pk_cache[table_name] = pk_constraint.get('constrained_columns', [])
             except Exception as e:
@@ -525,21 +676,18 @@ class TableSelector(App):
                 self.table_columns_cache[table_name] = []
                 self.table_pk_cache[table_name] = []
         else:
-            # Demo mode - generate mock data
             self.table_columns_cache[table_name] = [f"column_{i}" for i in range(1, 16)]
             self.table_pk_cache[table_name] = ["id", "seq_no"]
 
     def _update_side_panels(self) -> None:
-        """Update filter and PII display panels for current table"""
         if not self.current_table:
             return
         
-        # Load table metadata if not cached
         self._load_table_metadata(self.current_table)
         
-        # Update Filter Display (upper section)
+        # Update Filter Display
         filter_display = self.query_one("#filter-display", Static)
-        filter_rule = LARGE_TABLE_FILTERS.get(self.current_table)
+        filter_rule = self.filters.get(self.current_table)
         if filter_rule:
             filter_display.update(f"✅ WHERE:\n{filter_rule}")
             filter_display.remove_class("no-rule")
@@ -549,7 +697,7 @@ class TableSelector(App):
             filter_display.remove_class("has-rule")
             filter_display.add_class("no-rule")
         
-        # Update Primary Keys Display (lower section)
+        # Update Primary Keys
         pk_list = self.query_one("#pk-list", Static)
         pks = self.table_pk_cache.get(self.current_table, [])
         if pks:
@@ -558,9 +706,9 @@ class TableSelector(App):
         else:
             pk_list.update("  (無主鍵)")
         
-        # Update PII Display (upper section)
+        # Update PII Display
         pii_display = self.query_one("#pii-display", Static)
-        pii_rules = SENSITIVE_COLUMNS.get(self.current_table)
+        pii_rules = self.pii_rules.get(self.current_table)
         if pii_rules:
             lines = ["✅ 去敏化規則:"]
             for col, (func_name, seed_col) in pii_rules.items():
@@ -574,7 +722,7 @@ class TableSelector(App):
             pii_display.remove_class("has-rule")
             pii_display.add_class("no-rule")
         
-        # Update All Columns Display (lower section)
+        # Update All Columns
         column_list = self.query_one("#column-list", Static)
         columns = self.table_columns_cache.get(self.current_table, [])
         if columns:
@@ -592,31 +740,27 @@ class TableSelector(App):
         self.all_selected = not self.all_selected
         list_view = self.query_one("#table-list", ListView)
         target_state = self.all_selected
-        
         for item in list_view.children:
             if isinstance(item, TableItem):
                 if item.checked != target_state:
                     item.toggle()
-        
         self.notify(f"{'已全選' if self.all_selected else '已取消全選'}")
 
     def action_edit_filter(self) -> None:
-        """Open filter editor for current table"""
         if not self.current_table:
             self.notify("請先選擇資料表", severity="warning")
             return
         
-        current_filter = LARGE_TABLE_FILTERS.get(self.current_table, "")
+        current_filter = self.filters.get(self.current_table, "")
         
         def on_filter_result(result: str | None) -> None:
             if result is not None:
                 if result:
-                    LARGE_TABLE_FILTERS[self.current_table] = result
+                    self.filters[self.current_table] = result
                     self.notify(f"✅ 已更新 {self.current_table} 的篩選條件")
                 else:
-                    # Empty string means remove the filter
-                    if self.current_table in LARGE_TABLE_FILTERS:
-                        del LARGE_TABLE_FILTERS[self.current_table]
+                    if self.current_table in self.filters:
+                        del self.filters[self.current_table]
                         self.notify(f"🗑️ 已移除 {self.current_table} 的篩選條件")
                 self.configs_modified = True
                 self._update_side_panels()
@@ -624,47 +768,49 @@ class TableSelector(App):
         self.push_screen(FilterEditorScreen(self.current_table, current_filter), on_filter_result)
 
     def action_edit_pii(self) -> None:
-        """Open PII editor for current table"""
         if not self.current_table:
             self.notify("請先選擇資料表", severity="warning")
             return
         
-        current_rules = SENSITIVE_COLUMNS.get(self.current_table, {})
+        current_rules = self.pii_rules.get(self.current_table, {})
         
         def on_pii_result(result: dict | None) -> None:
             if result is not None:
                 if result:
-                    SENSITIVE_COLUMNS[self.current_table] = result
+                    self.pii_rules[self.current_table] = result
                     self.notify(f"✅ 已更新 {self.current_table} 的 PII 規則")
                 else:
-                    # Empty dict means remove the rules
-                    if self.current_table in SENSITIVE_COLUMNS:
-                        del SENSITIVE_COLUMNS[self.current_table]
+                    if self.current_table in self.pii_rules:
+                        del self.pii_rules[self.current_table]
                         self.notify(f"🗑️ 已移除 {self.current_table} 的 PII 規則")
                 self.configs_modified = True
                 self._update_side_panels()
         
         self.push_screen(PIIEditorScreen(self.current_table, current_rules), on_pii_result)
 
+    def action_project_settings(self) -> None:
+        """Open Project Settings"""
+        def on_settings_changed(changed: bool):
+            if changed:
+                # Reload metadata if needed? Name source only affects runtime.
+                # Just reload user object
+                self.project = config_mgr.get_project_by_id(self.project_id)
+        
+        self.push_screen(ProjectSettingsScreen(self.project_id), on_settings_changed)
+
     def action_save_configs(self) -> None:
-        """Save modified configs to JSON files"""
+        """Save to SQLite"""
         try:
-            # Save LARGE_TABLE_FILTERS
-            with open('large_table_filters.json', 'w', encoding='utf-8') as f:
-                json.dump(LARGE_TABLE_FILTERS, f, ensure_ascii=False, indent=2)
+            list_view = self.query_one("#table-list", ListView)
+            selected = [
+                item.table_name for item in list_view.children 
+                if isinstance(item, TableItem) and item.checked
+            ]
             
-            # Save SENSITIVE_COLUMNS - convert tuples to lists for JSON
-            sc_json = {}
-            for table, rules in SENSITIVE_COLUMNS.items():
-                sc_json[table] = {}
-                for col, (func_name, seed_col) in rules.items():
-                    sc_json[table][col] = [func_name, seed_col]
-            
-            with open('sensitive_columns.json', 'w', encoding='utf-8') as f:
-                json.dump(sc_json, f, ensure_ascii=False, indent=2)
+            config_mgr.save_project_state(self.project_id, selected, self.filters, self.pii_rules)
             
             self.configs_modified = False
-            self.notify("✅ 設定已儲存至 large_table_filters.json 和 sensitive_columns.json")
+            self.notify(f"✅ 專案 [{self.project.name}] 設定已儲存 (DB)")
         except Exception as e:
             self.notify(f"❌ 儲存失敗: {e}", severity="error")
 
@@ -679,17 +825,19 @@ class TableSelector(App):
             self.notify("請至少選擇一個資料表！", severity="error")
             return
 
-        # Warn if configs modified but not saved
         warning = ""
+        # Auto-save before running? Or warn?
+        # Let's auto-save for convenience
+        self.action_save_configs()
+        
         if self.configs_modified:
-            warning = "\n\n⚠️ 有未儲存的設定變更！"
+            warning = "\n\n⚠️ (Warning: Unsaved changes? logic error?)"
 
-        msg = f"已選擇 {len(selected_temp)} 個資料表。{warning}\n\n確定要開始嗎？"
+        msg = f"已選擇 {len(selected_temp)} 個資料表。\n設定已自動儲存。\n\n確定要開始嗎？"
         
         def check_confirm(is_confirmed: bool) -> None:
             if is_confirmed:
-                self.selected_tables = selected_temp
-                self.exit(self.selected_tables)
+                self.exit(selected_temp) # Return the tables to process
         
         self.push_screen(ConfirmScreen(msg), check_confirm)
 
@@ -808,14 +956,40 @@ def apply_anonymization(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
     return df
 
 def run_replication(args=None):
-    # 1. 建立連線
+    # --- Step 1: Project Selector ---
+    proj_app = ProjectSelector()
+    project_id = proj_app.run()
+    
+    if not project_id:
+        logger.info("未選擇專案，結束。")
+        return
+
+    # Load Project Config to prep for execution context
+    _, filters, pii_rules, name_source = config_mgr.get_project_config(project_id)
+    
+    # Update globals for apply_anonymization and execution usage
+    # Note: LARGE_TABLE_FILTERS was local to main logic in original, but relied on load_sideload.
+    # Now we must explicitly populate the globals that apply_anonymization uses
+    global SENSITIVE_COLUMNS, LARGE_TABLE_FILTERS
+    SENSITIVE_COLUMNS = pii_rules
+    LARGE_TABLE_FILTERS = filters
+
+    # --- Step 2: DB Connection & Name Init ---
     source_engine, target_engine = get_db_connection(args)
 
     if source_engine:
         try:
-            initialize_name_data(source_engine)
+            # Initialize Name Data with Project Name Source Settings
+            initialize_name_data(
+                source_engine, 
+                source_type=name_source['type'], 
+                source_value=name_source['value']
+            )
         except Exception as e:
             logger.warning(f"⚠️ Warning: Failed to initialize name data: {e}")
+    else:
+        # If no DB, we can still run demo with defaults
+        initialize_name_data(None)
     
     if not source_engine or not target_engine:
         logger.warning("⚠️ 無法建立有效連線，切換至 [Demo 模式]...")
@@ -831,17 +1005,23 @@ def run_replication(args=None):
         insp = inspect(source_engine)
         all_tables = sorted(insp.get_table_names())
 
-    # 2. 啟動 TUI 選擇 (pass inspector for metadata loading)
-    app = TableSelector(all_tables, inspector=insp)
+    # --- Step 3: Table Selection (Configured with Project) ---
+    app = TableSelector(project_id, all_tables, inspector=insp)
     selected_tables = app.run()
 
     if not selected_tables:
         logger.info("未選擇任何資料表，程式結束。")
         return
+    
+    # Reload Config just in case user changed it in TableSelector
+    # We do this because TableSelector might have saved new filters/PII
+    _, filters, pii_rules, _ = config_mgr.get_project_config(project_id)
+    SENSITIVE_COLUMNS = pii_rules
+    LARGE_TABLE_FILTERS = filters
 
     logger.info(f"\n已選擇 {len(selected_tables)} 個資料表，準備開始複製...\n")
     
-    # 3. 處理複製
+    # 4. 處理複製
     for table in selected_tables:
         logger.info(f"處理資料表: {table}")
         
