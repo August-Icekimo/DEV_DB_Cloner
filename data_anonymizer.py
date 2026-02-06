@@ -84,16 +84,14 @@ def save_obfuscate_names(filepath=OBFUSCATE_NAME_FILE):
     except Exception as e:
         print(f"Error saving obfuscate names: {e}")
 
-def init_names_from_database(engine):
+def init_names_from_database(engine, table_name="EMP_DATA", column_name="emp_name"):
     """
-    從資料庫 EMP_DATA 表初始化姓名資料，並將結果存入全域變數 SURNAMES 與 GIVEN_NAMES。這是基於我的專案才有的特別配置，
-    用於初始化姓名資料庫。如果引用到別的專案請注意，你一定沒有這個資料表，請自行修改。
-
+    從資料庫指定資料表初始化姓名資料。
+    
     Args:
         engine: SQLAlchemy 資料庫連線引擎。
-
-    Returns:
-        bool: 初始化成功傳回 True，否則傳回
+        table_name: 資料表名稱 (預設 EMP_DATA)
+        column_name: 姓名欄位名稱 (預設 emp_name)
     """
     global SURNAMES, GIVEN_NAMES
     
@@ -101,14 +99,19 @@ def init_names_from_database(engine):
         print("No database engine provided for name initialization.")
         return False
         
-    print("Initializing names from database EMP_DATA...")
+    print(f"Initializing names from database {table_name}.{column_name}...")
     try:
         new_surnames = set()
         new_given_names = set()
         
         with engine.connect() as conn:
-            # 取得所有非空員工姓名
-            result = conn.execute(text("SELECT DISTINCT emp_name FROM EMP_DATA WHERE emp_name IS NOT NULL AND LEN(emp_name) >= 2"))
+            # 取得所有非空姓名
+            # SQL Injection Note: table_name/column_name should be trusted or sanitized if from web input.
+            # Here it comes from local config, assumed safe.
+            query = text(f"SELECT DISTINCT {column_name} FROM {table_name} WHERE {column_name} IS NOT NULL AND LEN({column_name}) >= 2")
+            result = conn.execute(query)
+            
+            count = 0
             for row in result:
                 name = row[0].strip()
                 length = len(name)
@@ -118,20 +121,23 @@ def init_names_from_database(engine):
                     # 2字元: 1字姓 + 1字名
                     new_surnames.add(name[0])
                     new_given_names.add(name[1])
+                    count += 1
                 elif length == 3:
                     # 3字元: 1字姓 + 2字名
                     new_surnames.add(name[0])
                     new_given_names.add(name[1:])
+                    count += 1
                 elif length == 4:
                     # 4字元: 2字姓 + 2字名 (複姓)
                     new_surnames.add(name[:2])
                     new_given_names.add(name[2:])
+                    count += 1
                 # 忽略其他長度的名字
                 
         if new_surnames and new_given_names:
             SURNAMES = sorted(list(new_surnames))
             GIVEN_NAMES = sorted(list(new_given_names))
-            print(f"Initialized from DB: {len(SURNAMES)} surnames, {len(GIVEN_NAMES)} given names.")
+            print(f"Initialized from DB: {len(SURNAMES)} surnames, {len(GIVEN_NAMES)} given names (sampled from {count} records).")
             return True
         else:
             print("No valid names found in database.")
@@ -141,21 +147,38 @@ def init_names_from_database(engine):
         print(f"Error initializing names from database: {e}")
         return False
 
-def initialize_name_data(engine=None):
-    """初始化姓名資料流程"""
-    # 1. 嘗試從檔案載入
-    if load_obfuscate_names():
+def initialize_name_data(engine=None, source_type="DEFAULT", source_value=None):
+    """
+    初始化姓名資料流程
+    source_type: 'DEFAULT', 'FILE', 'DB'
+    source_value: File path (for FILE) or "Table.Column" (for DB)
+    """
+    # 1. FILE Mode
+    if source_type == "FILE":
+        filepath = source_value if source_value else OBFUSCATE_NAME_FILE
+        if load_obfuscate_names(filepath):
+            return
+
+    # 2. DB Mode
+    if source_type == "DB" and engine:
+        table = "EMP_DATA"
+        col = "emp_name"
+        if source_value and "." in source_value:
+            parts = source_value.split(".")
+            table = parts[0]
+            col = parts[1]
+            
+        if init_names_from_database(engine, table, col):
+            # Cache it to default file for next run speedup? or separate cache?
+            # For now, just keep in memory for this session.
+            return
+    
+    # 3. Default / Fallback (Load default file check)
+    if load_obfuscate_names(OBFUSCATE_NAME_FILE):
         return
 
-    # 2. 若檔案不存在或載入失敗，且有提供 DB engine，則從 DB 初始化
-    if engine:
-        if init_names_from_database(engine):
-            # 3. 初始化成功後存檔
-            save_obfuscate_names()
-        else:
-            print("Using default surname/given_names due to DB init failure.")
-    else:
-        print("No cache found and no DB engine provided. Using default test data.")
+    # 4. Fallback to hardcoded list (done by global init)
+    print("Using default internal surname/given_names.")
 
 def obfuscate_name(name: str, emp_no: str) -> str:
     """
