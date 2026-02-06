@@ -1,0 +1,53 @@
+name: Build All Platforms
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            artifact_name: DB_Cloner_Windows.exe
+            asset_name: DB_Cloner_Windows
+          - os: macos-latest
+            artifact_name: DB_Cloner_macOS
+            asset_name: DB_Cloner_macOS
+          - os: ubuntu-latest
+            artifact_name: DB_Cloner_Linux
+            asset_name: DB_Cloner_Linux
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+        cache: 'pip'
+
+    - name: Install System Dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y unixodbc-dev
+
+    - name: Install Dependencies
+      run: |
+        pip install pyinstaller
+        pip install -r requirements.txt
+
+    - name: Build with PyInstaller
+      run: |
+        pyinstaller --onefile --name ${{ matrix.asset_name }} --clean db_replicator.py
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ matrix.artifact_name }}
+        path: dist/${{ matrix.asset_name }}*
