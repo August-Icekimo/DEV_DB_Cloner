@@ -102,30 +102,66 @@ class ProjectSettingsScreen(ModalScreen[bool]):
     }
     #settings-dialog {
         width: 80;
-        height: 22;
+        height: 23;
         border: thick $background 80%;
         background: $surface;
         padding: 1 2;
+    }
+    .settings-title {
+        text-style: bold;
+        margin-bottom: 1;
     }
     .field-label {
         margin-top: 1;
         text-style: bold;
     }
-    #source-type-buttons {
+    #source-type-tabs {
         height: 3;
+        margin: 0 0 1 0;
+    }
+    #source-type-tabs Button {
+        margin-right: 1;
+        min-width: 16;
+    }
+    .tab-active {
+        background: $primary;
+        color: $text;
+        text-style: bold;
+    }
+    .tab-inactive {
+        background: $primary-lighten-3;
+        color: $primary;
+    }
+    #source-value-input {
+        margin: 0 0 1 0;
+    }
+    .help-text {
+        color: $text-muted;
         margin-bottom: 1;
     }
-    #source-type-buttons Button {
-        margin-right: 2;
+    #settings-buttons {
+        height: 4;
+        align: center middle;
+        margin-top: 1;
     }
-    .selected-type {
-        background: $accent;
+    #settings-buttons Button {
+        margin: 0 2;
+        min-width: 14;
+    }
+    #btn-cancel {
+        background: $surface-darken-2;
+        color: $text;
+    }
+    #btn-save {
+        background: $success;
         color: $text;
     }
     """
 
     BINDINGS = [
-        ("escape", "cancel", "離開"),
+        ("escape", "cancel", "取消"),
+        ("c", "cancel", "(C)ancel"),
+        ("s", "save", "(S)ave"),
     ]
 
     def __init__(self, project_id: int) -> None:
@@ -137,61 +173,69 @@ class ProjectSettingsScreen(ModalScreen[bool]):
 
     def compose(self) -> ComposeResult:
         yield Vertical(
-            Label(f"⚙️ 專案設定: {self.project.name}", classes="field-label"),
+            Label(f"⚙️ 專案設定: {self.project.name}", classes="settings-title"),
             
-            Label("姓名來源類型 (Name Source Type):", classes="field-label"),
+            Label("姓名來源設定 (Name Source):", classes="field-label"),
             Horizontal(
-                Button("預設 (Default)", id="type-default"),
-                Button("資料庫 (Database)", id="type-db"),
-                Button("檔案 (File)", id="type-file"),
-                id="source-type-buttons"
+                Button("預設\nDefault", id="type-default"),
+                Button("資料庫\nDatabase", id="type-db"),
+                Button("檔案\nFile", id="type-file"),
+                id="source-type-tabs"
             ),
             
-            Label("來源設定值 (Value):", classes="field-label"),
-            Label("  • DB: 'Table.Column' (e.g. USERS.full_name)\n  • File: 'path/to/names.json'", classes="help"),
-            TextArea(self.current_value, id="source-value-input"),
+            Label("來源設定值 (Source Value):", classes="field-label"),
+            Label("  DB → Table.Column (e.g. USERS.full_name)  |  File → path/to/names.json", classes="help-text"),
+            Input(value=self.current_value, placeholder="輸入來源設定值...", id="source-value-input"),
             
-            Label(" ", classes="field-label"), # Spacer
             Horizontal(
-                Button("取消 [Esc]", variant="default", id="cancel"),
-                Button("儲存設定", variant="primary", id="save"),
-                classes="dialog-buttons"
+                Button("取消\n(C)ancel", id="btn-cancel"),
+                Button("儲存\n(S)ave", id="btn-save"),
+                id="settings-buttons"
             ),
             id="settings-dialog"
         )
 
     def on_mount(self) -> None:
-        self._highlight_type_button()
+        self._update_tabs()
 
-    def _highlight_type_button(self):
-        for type_key in ["DEFAULT", "DB", "FILE"]:
-            btn = self.query_one(f"#type-{type_key.lower()}", Button)
+    def _update_tabs(self):
+        type_map = {"DEFAULT": "type-default", "DB": "type-db", "FILE": "type-file"}
+        for type_key, btn_id in type_map.items():
+            btn = self.query_one(f"#{btn_id}", Button)
             if self.current_type == type_key:
-                btn.variant = "success"
+                btn.remove_class("tab-inactive")
+                btn.add_class("tab-active")
             else:
-                btn.variant = "default"
+                btn.remove_class("tab-active")
+                btn.add_class("tab-inactive")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
-        if event.button.id == "cancel":
+        if event.button.id == "btn-cancel":
             self.dismiss(False)
-        elif event.button.id == "save":
-            val = self.query_one("#source-value-input", TextArea).text.strip()
-            config_mgr.update_project_settings(
-                self.project_id, 
-                self.project.name, 
-                self.project.description,
-                self.current_type,
-                val
-            )
-            self.notify("✅ 設定已更新")
-            self.dismiss(True)
+        elif event.button.id == "btn-save":
+            self._do_save()
         elif event.button.id.startswith("type-"):
             new_type = event.button.id.split("-")[1].upper()
             self.current_type = new_type
-            self._highlight_type_button()
+            self._update_tabs()
     
+    def _do_save(self):
+        val = self.query_one("#source-value-input", Input).value.strip()
+        config_mgr.update_project_settings(
+            self.project_id, 
+            self.project.name, 
+            self.project.description,
+            self.current_type,
+            val
+        )
+        self.notify("✅ 設定已更新")
+        self.dismiss(True)
+
     def action_cancel(self):
         self.dismiss(False)
+
+    def action_save(self):
+        self._do_save()
 
 
 class NewProjectScreen(ModalScreen[str]):
@@ -244,74 +288,110 @@ class ProjectSelector(App):
     CSS = """
     Screen { align: center middle; }
     #main-container { width: 60; height: 30; border: thick $primary; background: $surface; padding: 1; }
-    #proj-list { height: 1fr; border: solid $secondary; margin: 1 0; }
-    #buttons { height: 3; align: center middle; }
-    Button { margin: 0 1; }
+    #proj-list { height: 7; border: solid $secondary; margin: 1 0; overflow-y: auto; }
+    #buttons { height: 4; align: center middle; }
+    Button { margin: 0 1; min-width: 12; }
     """
+
+    BINDINGS = [
+        ("n", "new_project", "(N)ew"),
+        ("c", "copy_project", "(C)opy"),
+        ("o", "open_project", "(O)pen"),
+        ("d", "drop_project", "(D)rop"),
+    ]
 
     def on_mount(self):
         self.refresh_list()
+        list_view = self.query_one("#proj-list", ListView)
+        list_view.focus()
+        if self.projects:
+            list_view.index = 0
 
     def refresh_list(self):
         self.projects = config_mgr.get_all_projects()
         list_view = self.query_one("#proj-list", ListView)
+        prev_index = list_view.index
         list_view.clear()
         for p in self.projects:
             list_view.append(ListItem(Label(f"📁 {p.name}")))
+        # Restore selection
+        if self.projects:
+            if prev_index is not None and prev_index < len(self.projects):
+                list_view.index = prev_index
+            else:
+                list_view.index = 0
 
     def compose(self) -> ComposeResult:
         yield Vertical(
             Label("🗄️ 專案選擇 (Project Selector)", classes="title"),
             ListView(id="proj-list"),
             Horizontal(
-                Button("建立新專案", variant="success", id="new"),
-                Button("複製專案", variant="warning", id="clone"),
-                Button("開啟專案", variant="primary", id="open"),
-                Button("刪除專案", variant="error", id="delete"),
+                Button("新建\n(N)ew", variant="success", id="new"),
+                Button("複製\n(C)opy", variant="warning", id="clone"),
+                Button("開啟\n(O)pen", variant="primary", id="open"),
+                Button("刪除\n(D)rop", variant="error", id="delete"),
                 id="buttons"
             ),
             id="main-container"
         )
 
+    def action_new_project(self) -> None:
+        self._do_new()
+
+    def action_copy_project(self) -> None:
+        self._do_clone()
+
+    def action_open_project(self) -> None:
+        self._open_selected()
+
+    def action_drop_project(self) -> None:
+        self._do_delete()
+
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "new":
-            def on_new(name):
-                if name:
-                    try:
-                        config_mgr.create_project(name)
-                        self.refresh_list()
-                    except Exception as e:
-                        self.notify(f"Error: {e}", severity="error")
-            self.push_screen(NewProjectScreen(), on_new)
-        
+            self._do_new()
         elif event.button.id == "open":
             self._open_selected()
-        
         elif event.button.id == "clone":
-            list_view = self.query_one("#proj-list", ListView)
-            if list_view.index is not None:
-                source = self.projects[list_view.index]
-                def on_clone_name(name):
-                    if name:
-                        try:
-                            config_mgr.clone_project(source.id, name)
-                            self.refresh_list()
-                            self.notify(f"✅ 已複製 [{source.name}] → [{name}]")
-                        except Exception as e:
-                            self.notify(f"❌ 複製失敗: {e}", severity="error")
-                self.push_screen(NewProjectScreen(), on_clone_name)
-            else:
-                self.notify("請先選擇要複製的專案", severity="warning")
-
+            self._do_clone()
         elif event.button.id == "delete":
-            list_view = self.query_one("#proj-list", ListView)
-            if list_view.index is not None:
-                p = self.projects[list_view.index]
-                if p.name == "Default":
-                    self.notify("無法刪除預設專案", severity="error")
-                    return
-                config_mgr.delete_project(p.id)
-                self.refresh_list()
+            self._do_delete()
+
+    def _do_new(self):
+        def on_new(name):
+            if name:
+                try:
+                    config_mgr.create_project(name)
+                    self.refresh_list()
+                except Exception as e:
+                    self.notify(f"Error: {e}", severity="error")
+        self.push_screen(NewProjectScreen(), on_new)
+
+    def _do_clone(self):
+        list_view = self.query_one("#proj-list", ListView)
+        if list_view.index is not None:
+            source = self.projects[list_view.index]
+            def on_clone_name(name):
+                if name:
+                    try:
+                        config_mgr.clone_project(source.id, name)
+                        self.refresh_list()
+                        self.notify(f"✅ 已複製 [{source.name}] → [{name}]")
+                    except Exception as e:
+                        self.notify(f"❌ 複製失敗: {e}", severity="error")
+            self.push_screen(NewProjectScreen(), on_clone_name)
+        else:
+            self.notify("請先選擇要複製的專案", severity="warning")
+
+    def _do_delete(self):
+        list_view = self.query_one("#proj-list", ListView)
+        if list_view.index is not None:
+            p = self.projects[list_view.index]
+            if p.name == "Default":
+                self.notify("無法刪除預設專案", severity="error")
+                return
+            config_mgr.delete_project(p.id)
+            self.refresh_list()
 
     def _open_selected(self):
         list_view = self.query_one("#proj-list", ListView)
@@ -381,7 +461,7 @@ class ConfirmScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         yield Vertical(
             Label(self.message, id="question"),
-            Label("[Y] 確認  [N] 取消", id="help"),
+            Label("確認y 取消n", id="help"),
             id="dialog"
         )
 
@@ -603,8 +683,18 @@ class TableSelector(App):
     .metadata-scroll:focus {
         border: solid $accent;
     }
-    .info {
-        padding: 1;
+    .info-bar {
+        height: 1;
+        padding: 0 1;
+    }
+    #project-badge {
+        background: $primary;
+        color: $warning;
+        text-style: bold;
+        padding: 0 1;
+    }
+    #info-hints {
+        padding: 0 1;
     }
     .has-rule {
         color: $success;
@@ -618,13 +708,14 @@ class TableSelector(App):
     """
 
     BINDINGS = [
-        ("a", "select_all", "全選/取消"),
+        ("a", "select_all", "全選"),
         ("space", "toggle_current", "選取"),
-        ("f", "edit_filter", "編輯篩選[F]"),
-        ("p", "edit_pii", "編輯PII[P]"),
-        Binding("o", "project_settings", "專案設定[O]"), # New binding
-        ("s", "save_configs", "存檔[S]"),
-        ("g", "initiate_confirm", "確認開始[G]"),
+        ("f", "edit_filter", "篩選"),
+        ("p", "edit_pii", "PII"),
+        Binding("o", "project_settings", "設定"),
+        ("s", "save_configs", "存檔"),
+        ("g", "initiate_confirm", "開始"),
+        Binding("ctrl+o", "back_to_project", "切換專案", show=False),
         Binding("tab", "focus_next", "下個區域", show=False),
         Binding("shift+tab", "focus_previous", "上個區域", show=False),
         ("q", "quit", "離開"),
@@ -656,10 +747,9 @@ class TableSelector(App):
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Label(
-            f"專案: {self.project.name} | Space_選取 F_篩選 P_PII O_設定 S_存檔 G_開始",
-            classes="info"
-        )
+        with Horizontal(classes="info-bar"):
+            yield Label(f" 專案^O: {self.project.name} ", id="project-badge")
+            yield Label(" Space_選取 F_篩選 P_PII O_設定 S_存檔 G_開始", id="info-hints")
         
         with Horizontal(id="columns-container"):
             # Column 1: Tables
@@ -829,6 +919,10 @@ class TableSelector(App):
         
         self.push_screen(PIIEditorScreen(self.current_table, current_rules), on_pii_result)
 
+    def action_back_to_project(self) -> None:
+        """Go back to Project Selector (Ctrl+O)"""
+        self.exit("__BACK_TO_PROJECT__")
+
     def action_project_settings(self) -> None:
         """Open Project Settings"""
         def on_settings_changed(changed: bool):
@@ -997,62 +1091,62 @@ def apply_anonymization(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
     return df
 
 def run_replication(args=None):
-    # --- Step 1: Project Selector ---
-    proj_app = ProjectSelector()
-    project_id = proj_app.run()
-    
-    if not project_id:
-        logger.info("未選擇專案，結束。")
-        return
+    while True:
+        # --- Step 1: Project Selector ---
+        proj_app = ProjectSelector()
+        project_id = proj_app.run()
+        
+        if not project_id:
+            logger.info("未選擇專案，結束。")
+            return
 
-    # Load Project Config to prep for execution context
-    _, filters, pii_rules, name_source = config_mgr.get_project_config(project_id)
-    
-    # Update globals for apply_anonymization and execution usage
-    # Note: LARGE_TABLE_FILTERS was local to main logic in original, but relied on load_sideload.
-    # Now we must explicitly populate the globals that apply_anonymization uses
-    global SENSITIVE_COLUMNS, LARGE_TABLE_FILTERS
-    SENSITIVE_COLUMNS = pii_rules
-    LARGE_TABLE_FILTERS = filters
+        # Load Project Config to prep for execution context
+        _, filters, pii_rules, name_source = config_mgr.get_project_config(project_id)
+        
+        # Update globals for apply_anonymization and execution usage
+        global SENSITIVE_COLUMNS, LARGE_TABLE_FILTERS
+        SENSITIVE_COLUMNS = pii_rules
+        LARGE_TABLE_FILTERS = filters
 
-    # --- Step 2: DB Connection & Name Init ---
-    source_engine, target_engine = get_db_connection(args)
+        # --- Step 2: DB Connection & Name Init ---
+        source_engine, target_engine = get_db_connection(args)
 
-    if source_engine:
-        try:
-            # Initialize Name Data with Project Name Source Settings
-            initialize_name_data(
-                source_engine, 
-                source_type=name_source['type'], 
-                source_value=name_source['value']
-            )
-        except Exception as e:
-            logger.warning(f"⚠️ Warning: Failed to initialize name data: {e}")
-    else:
-        # If no DB, we can still run demo with defaults
-        initialize_name_data(None)
-    
-    if not source_engine or not target_engine:
-        logger.warning("⚠️ 無法建立有效連線，切換至 [Demo 模式]...")
-        # 模擬資料表清單
-        mock_tables = [f"TABLE_{i:03d}" for i in range(1, 251)] 
-        mock_tables.extend(LARGE_TABLE_FILTERS.keys()) 
-        mock_tables.extend(SENSITIVE_COLUMNS.keys())
-        all_tables = sorted(list(set(mock_tables)))
-        insp = None  # No inspector in demo mode
-    else:
-        # 從真實資料庫取得資料表清單
-        logger.info("正在讀取資料表清單...")
-        insp = inspect(source_engine)
-        all_tables = sorted(insp.get_table_names())
+        if source_engine:
+            try:
+                initialize_name_data(
+                    source_engine, 
+                    source_type=name_source['type'], 
+                    source_value=name_source['value']
+                )
+            except Exception as e:
+                logger.warning(f"⚠️ Warning: Failed to initialize name data: {e}")
+        else:
+            initialize_name_data(None)
+        
+        if not source_engine or not target_engine:
+            logger.warning("⚠️ 無法建立有效連線，切換至 [Demo 模式]...")
+            mock_tables = [f"TABLE_{i:03d}" for i in range(1, 251)] 
+            mock_tables.extend(LARGE_TABLE_FILTERS.keys()) 
+            mock_tables.extend(SENSITIVE_COLUMNS.keys())
+            all_tables = sorted(list(set(mock_tables)))
+            insp = None
+        else:
+            logger.info("正在讀取資料表清單...")
+            insp = inspect(source_engine)
+            all_tables = sorted(insp.get_table_names())
 
-    # --- Step 3: Table Selection (Configured with Project) ---
-    app = TableSelector(project_id, all_tables, inspector=insp)
-    selected_tables = app.run()
+        # --- Step 3: Table Selection (Configured with Project) ---
+        app = TableSelector(project_id, all_tables, inspector=insp)
+        selected_tables = app.run()
 
-    if not selected_tables:
-        logger.info("未選擇任何資料表，程式結束。")
-        return
+        # Check if user wants to go back to Project Selector
+        if selected_tables == "__BACK_TO_PROJECT__":
+            logger.info("返回專案選擇...")
+            continue
+
+        if not selected_tables:
+            logger.info("未選擇任何資料表，程式結束。")
+            return
     
     # Reload Config just in case user changed it in TableSelector
     # We do this because TableSelector might have saved new filters/PII
