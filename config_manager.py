@@ -291,3 +291,46 @@ class ConfigManager:
                 project.name_source_type = name_source_type
                 project.name_source_value = name_source_value
                 session.commit()
+
+    def clone_project(self, source_project_id: int, new_name: str) -> Project:
+        """Clone an existing project with all its table configs and PII rules"""
+        with self.get_session() as session:
+            source = session.get(Project, source_project_id)
+            if not source:
+                raise ValueError(f"Source project ID {source_project_id} not found")
+
+            # Create new project with same settings
+            new_project = Project(
+                name=new_name,
+                description=f"Cloned from [{source.name}]",
+                name_source_type=source.name_source_type,
+                name_source_value=source.name_source_value
+            )
+            session.add(new_project)
+            session.flush()  # Get new_project.id
+
+            # Clone all table configs
+            for pt in source.tables:
+                new_pt = ProjectTable(
+                    project_id=new_project.id,
+                    table_name=pt.table_name,
+                    is_selected=pt.is_selected,
+                    filter_clause=pt.filter_clause
+                )
+                session.add(new_pt)
+                session.flush()  # Get new_pt.id
+
+                # Clone sensitive columns
+                for sc in pt.sensitive_columns:
+                    new_sc = SensitiveColumn(
+                        project_table_id=new_pt.id,
+                        column_name=sc.column_name,
+                        function_name=sc.function_name,
+                        seed_column=sc.seed_column
+                    )
+                    session.add(new_sc)
+
+            session.commit()
+            session.refresh(new_project)
+            session.expunge(new_project)
+            return new_project

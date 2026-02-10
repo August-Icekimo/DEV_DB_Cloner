@@ -78,7 +78,7 @@ from data_anonymizer import (
 # --- Textual TUI App ---
 
 from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, ListView, ListItem, Label, Button, Static, TextArea
+from textual.widgets import Header, Footer, ListView, ListItem, Label, Button, Static, TextArea, Input
 from textual.containers import Vertical, Horizontal, ScrollableContainer
 from textual.binding import Binding
 from textual.screen import ModalScreen
@@ -197,21 +197,46 @@ class ProjectSettingsScreen(ModalScreen[bool]):
 class NewProjectScreen(ModalScreen[str]):
     CSS = """
     NewProjectScreen { align: center middle; }
-    #new-proj-dialog { width: 60; height: 10; border: thick $background 80%; background: $surface; padding: 1 2; }
+    #new-proj-dialog { width: 60; height: 8; border: thick $background 80%; background: $surface; padding: 1 2; }
+    #new-proj-name { margin: 1 0; }
+    #new-proj-buttons { height: 3; align: center middle; }
+    #new-proj-buttons Button { margin: 0 1; }
     """
+
+    BINDINGS = [
+        ("escape", "cancel", "取消"),
+    ]
+
     def compose(self) -> ComposeResult:
         yield Vertical(
-            Label("建立新專案 (Project Name):"),
-            TextArea("", id="new-proj-name"),
-            Horizontal(Button("取消", id="cancel"), Button("建立", variant="primary", id="create")),
+            Label("📁 建立新專案 (Enter 確認 / Esc 取消):"),
+            Input(placeholder="輸入專案名稱...", id="new-proj-name"),
+            Horizontal(
+                Button("取消 [Esc]", id="cancel"),
+                Button("建立 [Enter]", variant="primary", id="create"),
+                id="new-proj-buttons"
+            ),
             id="new-proj-dialog"
         )
+
+    def on_mount(self) -> None:
+        self.query_one("#new-proj-name", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        name = event.value.strip()
+        if name:
+            self.dismiss(name)
+
     def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "create":
-            name = self.query_one("#new-proj-name", TextArea).text.strip()
-            if name: self.dismiss(name)
+            name = self.query_one("#new-proj-name", Input).value.strip()
+            if name:
+                self.dismiss(name)
         else:
             self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class ProjectSelector(App):
@@ -236,10 +261,11 @@ class ProjectSelector(App):
 
     def compose(self) -> ComposeResult:
         yield Vertical(
-            Label("🗄️ 專案管理 (Project Manager)", classes="title"),
+            Label("🗄️ 專案選擇 (Project Selector)", classes="title"),
             ListView(id="proj-list"),
             Horizontal(
                 Button("建立新專案", variant="success", id="new"),
+                Button("複製專案", variant="warning", id="clone"),
                 Button("開啟專案", variant="primary", id="open"),
                 Button("刪除專案", variant="error", id="delete"),
                 id="buttons"
@@ -261,6 +287,22 @@ class ProjectSelector(App):
         elif event.button.id == "open":
             self._open_selected()
         
+        elif event.button.id == "clone":
+            list_view = self.query_one("#proj-list", ListView)
+            if list_view.index is not None:
+                source = self.projects[list_view.index]
+                def on_clone_name(name):
+                    if name:
+                        try:
+                            config_mgr.clone_project(source.id, name)
+                            self.refresh_list()
+                            self.notify(f"✅ 已複製 [{source.name}] → [{name}]")
+                        except Exception as e:
+                            self.notify(f"❌ 複製失敗: {e}", severity="error")
+                self.push_screen(NewProjectScreen(), on_clone_name)
+            else:
+                self.notify("請先選擇要複製的專案", severity="warning")
+
         elif event.button.id == "delete":
             list_view = self.query_one("#proj-list", ListView)
             if list_view.index is not None:
