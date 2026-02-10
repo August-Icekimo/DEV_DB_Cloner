@@ -287,9 +287,15 @@ class ProjectSelector(App):
     """App to select or manage projects"""
     CSS = """
     Screen { align: center middle; }
-    #main-container { width: 60; height: 30; border: thick $primary; background: $surface; padding: 1; }
-    #proj-list { height: 7; border: solid $secondary; margin: 1 0; overflow-y: auto; }
-    #buttons { height: 4; align: center middle; }
+    #main-container { width: 64; height: 24; border: thick $primary; background: $surface; padding: 1 2; }
+    .title {
+        width: 100%;
+        content-align: center middle;
+        text-style: bold reverse;
+        margin-bottom: 1;
+    }
+    #proj-list { height: 11; border: solid $secondary; margin: 1 0; overflow-y: auto; }
+    #buttons { height: 4; align: center middle; margin-top: 1; }
     Button { margin: 0 1; min-width: 12; }
     """
 
@@ -323,7 +329,7 @@ class ProjectSelector(App):
 
     def compose(self) -> ComposeResult:
         yield Vertical(
-            Label("🗄️ 專案選擇 (Project Selector)", classes="title"),
+            Static(" 專案選擇 (Project Selector) ", classes="title"),
             ListView(id="proj-list"),
             Horizontal(
                 Button("新建\n(N)ew", variant="success", id="new"),
