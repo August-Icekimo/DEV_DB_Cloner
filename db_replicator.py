@@ -280,6 +280,7 @@ class ProjectSelector(App):
             self.notify("請選擇一個專案")
 
 
+class TableItem(ListItem):
     """Custom ListItem with checkbox-like behavior"""
     def __init__(self, name: str) -> None:
         super().__init__()
@@ -292,8 +293,6 @@ class ProjectSelector(App):
 
     def on_click(self) -> None:
         self.toggle()
-
-
 
     def toggle(self) -> None:
         self.checked = not self.checked
