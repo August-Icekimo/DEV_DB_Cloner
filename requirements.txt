@@ -1,5 +1,5 @@
 sqlalchemy>=2.0
 pandas>=2.0
-pyodbc>=5.0
+pymssql>=2.2
 tqdm>=4.60
 textual>=0.50.0

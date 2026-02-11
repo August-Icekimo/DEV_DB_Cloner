@@ -4,8 +4,7 @@ channels:
   - defaults
 dependencies:
   - python>=3.9
-  - unixodbc
-  - pyodbc>=5.0
+  - pymssql>=2.2
   # Prefer conda-forge packages for better compatibility
   - sqlalchemy>=2.0
   - pandas>=2.0

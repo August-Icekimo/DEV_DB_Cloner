@@ -44,7 +44,7 @@ SENSITIVE_COLUMNS = {}
 REQUIRED_PACKAGES = {
     'sqlalchemy': 'SQLAlchemy',
     'pandas': 'pandas', 
-    'pyodbc': 'pyodbc',
+    'pymssql': 'pymssql',
     'tqdm': 'tqdm',
     'textual': 'textual'
 }
@@ -283,6 +283,104 @@ class NewProjectScreen(ModalScreen[str]):
         self.dismiss(None)
 
 
+class InfoScreen(ModalScreen[None]):
+    """Modal screen to display Info.txt content"""
+
+    CSS = """
+    InfoScreen {
+        align: center middle;
+    }
+    #info-dialog {
+        width: 70;
+        height: 30;
+        border: thick $background 80%;
+        background: $surface;
+        padding: 1 2;
+    }
+    #info-content {
+        height: 1fr;
+    }
+    #info-hint {
+        height: 1;
+        content-align: center middle;
+        color: $text-muted;
+    }
+    """
+
+    BINDINGS = [
+        ("q", "close", "關閉"),
+        ("escape", "close", "關閉"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        info_text = "(Info.txt 檔案不存在)"
+        info_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Info.txt")
+        if os.path.exists(info_path):
+            try:
+                with open(info_path, 'r', encoding='utf-8') as f:
+                    info_text = f.read()
+            except Exception as e:
+                info_text = f"讀取 Info.txt 失敗: {e}"
+
+        yield Vertical(
+            TextArea(info_text, read_only=True, id="info-content"),
+            Label("按 Q 或 ESC 關閉", id="info-hint"),
+            id="info-dialog"
+        )
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class ImportPrefixScreen(ModalScreen[str]):
+    """Modal screen to input import file prefix"""
+
+    CSS = """
+    ImportPrefixScreen { align: center middle; }
+    #import-dialog { width: 60; height: 10; border: thick $background 80%; background: $surface; padding: 1 2; }
+    #import-prefix { margin: 1 0; }
+    .import-help { color: $text-muted; }
+    #import-buttons { height: 3; align: center middle; }
+    #import-buttons Button { margin: 0 1; }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel", "取消"),
+    ]
+
+    def compose(self) -> ComposeResult:
+        yield Vertical(
+            Label("📥 匯入設定 — 請輸入檔案名稱前綴:"),
+            Label("  程式會讀取 {前綴}_filters.json + {前綴}_sensitive_columns.json", classes="import-help"),
+            Input(placeholder="例如: Default", id="import-prefix"),
+            Horizontal(
+                Button("取消 [Esc]", id="cancel"),
+                Button("匯入 [Enter]", variant="primary", id="do-import"),
+                id="import-buttons"
+            ),
+            id="import-dialog"
+        )
+
+    def on_mount(self) -> None:
+        self.query_one("#import-prefix", Input).focus()
+
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        prefix = event.value.strip()
+        if prefix:
+            self.dismiss(prefix)
+
+    def on_button_pressed(self, event: Button.Pressed):
+        if event.button.id == "do-import":
+            prefix = self.query_one("#import-prefix", Input).value.strip()
+            if prefix:
+                self.dismiss(prefix)
+        else:
+            self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class ProjectSelector(App):
     """App to select or manage projects"""
     CSS = """
@@ -294,8 +392,9 @@ class ProjectSelector(App):
         text-style: bold reverse;
         margin-bottom: 1;
     }
-    #proj-list { height: 11; border: solid $secondary; margin: 1 0; overflow-y: auto; }
+    #proj-list { height: 9; border: solid $secondary; margin: 1 0; overflow-y: auto; }
     #buttons { height: 4; align: center middle; margin-top: 1; }
+    #buttons2 { height: 4; align: center middle; }
     Button { margin: 0 1; min-width: 12; }
     """
 
@@ -304,6 +403,10 @@ class ProjectSelector(App):
         ("c", "copy_project", "(C)opy"),
         ("o", "open_project", "(O)pen"),
         ("d", "drop_project", "(D)rop"),
+        ("i", "import_config", "(I)mport"),
+        ("e", "export_config", "(E)xport"),
+        ("x", "exit_app", "e(X)it"),
+        ("question_mark", "show_info", "(?)"),
     ]
 
     def on_mount(self):
@@ -338,8 +441,19 @@ class ProjectSelector(App):
                 Button("刪除\n(D)rop", variant="error", id="delete"),
                 id="buttons"
             ),
+            Horizontal(
+                Button("匯入\n(I)mport", variant="primary", id="import"),
+                Button("匯出\n(E)xport", variant="primary", id="export"),
+                Button("離開\ne(X)it", variant="error", id="exit"),
+                Button("說明\n(?)", variant="default", id="info"),
+                id="buttons2"
+            ),
             id="main-container"
         )
+
+    def on_list_view_selected(self, event: ListView.Selected) -> None:
+        """Handle double-click or Enter on a project list item"""
+        self._open_selected()
 
     def action_new_project(self) -> None:
         self._do_new()
@@ -362,6 +476,14 @@ class ProjectSelector(App):
             self._do_clone()
         elif event.button.id == "delete":
             self._do_delete()
+        elif event.button.id == "import":
+            self._do_import()
+        elif event.button.id == "export":
+            self._do_export()
+        elif event.button.id == "exit":
+            self.exit(None)
+        elif event.button.id == "info":
+            self.push_screen(InfoScreen())
 
     def _do_new(self):
         def on_new(name):
@@ -406,6 +528,49 @@ class ProjectSelector(App):
             self.exit(project.id)
         else:
             self.notify("請選擇一個專案")
+
+    def action_import_config(self) -> None:
+        self._do_import()
+
+    def action_export_config(self) -> None:
+        self._do_export()
+
+    def action_exit_app(self) -> None:
+        self.exit(None)
+
+    def action_show_info(self) -> None:
+        self.push_screen(InfoScreen())
+
+    def _do_import(self):
+        list_view = self.query_one("#proj-list", ListView)
+        if list_view.index is None:
+            self.notify("請先選擇要匯入的專案", severity="warning")
+            return
+        project = self.projects[list_view.index]
+
+        def on_prefix(prefix):
+            if prefix:
+                try:
+                    config_mgr.import_from_json(project.id, prefix)
+                    self.notify(f"✅ 已匯入 [{prefix}] 設定到專案 [{project.name}]")
+                except FileNotFoundError as e:
+                    self.notify(f"❌ {e}", severity="error")
+                except Exception as e:
+                    self.notify(f"❌ 匯入失敗: {e}", severity="error")
+
+        self.push_screen(ImportPrefixScreen(), on_prefix)
+
+    def _do_export(self):
+        list_view = self.query_one("#proj-list", ListView)
+        if list_view.index is None:
+            self.notify("請先選擇要匯出的專案", severity="warning")
+            return
+        project = self.projects[list_view.index]
+        try:
+            f_path, s_path = config_mgr.export_to_json(project.id)
+            self.notify(f"✅ 已匯出:\n  {f_path}\n  {s_path}")
+        except Exception as e:
+            self.notify(f"❌ 匯出失敗: {e}", severity="error")
 
 
 class TableItem(ListItem):
@@ -660,9 +825,19 @@ class TableSelector(App):
         text-style: bold;
         padding: 0 1;
     }
+    .column-header:hover {
+        background: $accent-lighten-1;
+        text-style: bold underline;
+    }
     #table-list {
         height: 1fr;
         border: none;
+    }
+    ListItem {
+        padding: 0 1;
+    }
+    ListItem:hover {
+        background: $primary-background;
     }
     /* Split panel styles */
     .panel-upper {
@@ -698,9 +873,19 @@ class TableSelector(App):
         color: $warning;
         text-style: bold;
         padding: 0 1;
+        min-width: 20;
+        height: 1;
+        border: none;
+    }
+    #project-badge:hover {
+        background: $primary-lighten-1;
+        text-style: bold underline;
     }
     #info-hints {
         padding: 0 1;
+    }
+    #info-hints:hover {
+        color: $warning;
     }
     .has-rule {
         color: $success;
@@ -754,7 +939,7 @@ class TableSelector(App):
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
         with Horizontal(classes="info-bar"):
-            yield Label(f" 專案^O: {self.project.name} ", id="project-badge")
+            yield Button(f" 專案^O: {self.project.name} ", id="project-badge")
             yield Label(" Space_選取 F_篩選 P_PII O_設定 S_存檔 G_開始", id="info-hints")
         
         with Horizontal(id="columns-container"):
@@ -797,6 +982,11 @@ class TableSelector(App):
         if event.item and isinstance(event.item, TableItem):
             self.current_table = event.item.table_name
             self._update_side_panels()
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button clicks — project badge returns to project selector"""
+        if event.button.id == "project-badge":
+            self.action_back_to_project()
 
     def _load_table_metadata(self, table_name: str) -> None:
         if table_name in self.table_columns_cache:
@@ -996,35 +1186,30 @@ def get_db_connection(args=None):
     
     # Source Database Configuration
     src_config = {
-        'driver': 'ODBC Driver 18 for SQL Server',
         'server': get_conf('src_server', 'SRC_DB_SERVER', '172.22.1.34'),
         'database': get_conf('src_database', 'SRC_DB_NAME', 'hrm'),
         'uid': get_conf('src_uid', 'SRC_DB_UID', 'yr3158'),
         'pwd': get_conf('src_pwd', 'SRC_DB_PWD', 'Vita0309'),
-        'trust_server_certificate': 'yes'
     }
 
     # Target Database Configuration
     tgt_config = {
-        'driver': 'ODBC Driver 18 for SQL Server',
         'server': get_conf('tgt_server', 'TGT_DB_SERVER', 'localhost'),
         'database': get_conf('tgt_database', 'TGT_DB_NAME', 'hrm'),
         'uid': get_conf('tgt_uid', 'TGT_DB_UID', 'sa'),
         'pwd': get_conf('tgt_pwd', 'TGT_DB_PWD', 'No@KeyTakeaway'),
-        'trust_server_certificate': 'yes'
     }
 
     
     # Construct Connection Strings
-    # Format: mssql+pyodbc://uid:pwd@server/database?driver=...
+    # Format: mssql+pymssql://uid:pwd@server/database
     
     import urllib.parse
 
     def build_conn_str(cfg):
         # Encode password to handle special characters (e.g., '@')
         encoded_pwd = urllib.parse.quote_plus(cfg['pwd'])
-        return (f"mssql+pyodbc://{cfg['uid']}:{encoded_pwd}@{cfg['server']}/{cfg['database']}"
-                f"?driver={cfg['driver'].replace(' ', '+')}&TrustServerCertificate={cfg['trust_server_certificate']}")
+        return f"mssql+pymssql://{cfg['uid']}:{encoded_pwd}@{cfg['server']}/{cfg['database']}"
 
     src_conn_str = build_conn_str(src_config)
     tgt_conn_str = build_conn_str(tgt_config)
@@ -1154,6 +1339,7 @@ def run_replication(args=None):
             logger.info("未選擇任何資料表，程式結束。")
             return
     
+        break  # Exit the while loop → proceed to clone
     # Reload Config just in case user changed it in TableSelector
     # We do this because TableSelector might have saved new filters/PII
     _, filters, pii_rules, _ = config_mgr.get_project_config(project_id)

@@ -43,7 +43,7 @@ jobs:
       # Install system-level dependencies for Linux if needed (e.g. odbc headers)
       run: |
         pip install pyinstaller
-        pip install sqlalchemy pandas pyodbc tqdm textual
+        pip install sqlalchemy pandas pymssql tqdm textual
         
     - name: Build with PyInstaller
       run: |
@@ -74,14 +74,6 @@ If you ignore GitHub Actions, you must build on the specific machine:
 
 ---
 
-## ⚠️ CRITICAL: ODBC Driver Deps (All Platforms)
+## ✅ No ODBC Driver Required
 
-**The Driver is NOT included in the executable.**
-
-| Platform | Requirement |
-| :--- | :--- |
-| **Windows** | User must install `ODBC Driver 18 for SQL Server` (msi). |
-| **macOS** | User must install via Homebrew: `brew install msodbcsql18` |
-| **Linux** | User must install the Microsoft ODBC driver for their specific distro (apt-get/yum). |
-
-If the driver is missing, the app will crash with "Data source name not found".
+This project uses `pymssql` which connects via the TDS protocol directly. The ODBC driver is **NOT** required on the target machine. The PyInstaller executable is fully self-contained.

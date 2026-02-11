@@ -334,3 +334,90 @@ class ConfigManager:
             session.refresh(new_project)
             session.expunge(new_project)
             return new_project
+
+    def export_to_json(self, project_id: int, output_dir: str = ".") -> Tuple[str, str]:
+        """
+        Export a project's filters and sensitive columns to JSON files.
+        Returns tuple of (filters_path, sensitive_path).
+        """
+        with self.get_session() as session:
+            project = session.get(Project, project_id)
+            if not project:
+                raise ValueError(f"Project ID {project_id} not found")
+
+            filters = {}
+            sensitive_columns = {}
+
+            for pt in project.tables:
+                if pt.filter_clause:
+                    filters[pt.table_name] = pt.filter_clause
+
+                sc_map = {}
+                for sc in pt.sensitive_columns:
+                    sc_map[sc.column_name] = [sc.function_name, sc.seed_column]
+                if sc_map:
+                    sensitive_columns[pt.table_name] = sc_map
+
+            safe_name = project.name.replace(" ", "_")
+            filters_path = os.path.join(output_dir, f"{safe_name}_filters.json")
+            sensitive_path = os.path.join(output_dir, f"{safe_name}_sensitive_columns.json")
+
+            with open(filters_path, 'w', encoding='utf-8') as f:
+                json.dump(filters, f, ensure_ascii=False, indent=2)
+
+            with open(sensitive_path, 'w', encoding='utf-8') as f:
+                json.dump(sensitive_columns, f, ensure_ascii=False, indent=2)
+
+            logger.info(f"Exported project '{project.name}' to: {filters_path}, {sensitive_path}")
+            return filters_path, sensitive_path
+
+    def import_from_json(self, project_id: int, prefix: str, input_dir: str = "."):
+        """
+        Import filters and sensitive columns from JSON files into a project.
+        Reads {prefix}_filters.json and {prefix}_sensitive_columns.json.
+        """
+        filters_path = os.path.join(input_dir, f"{prefix}_filters.json")
+        sensitive_path = os.path.join(input_dir, f"{prefix}_sensitive_columns.json")
+
+        json_filters = {}
+        json_sensitive = {}
+
+        if os.path.exists(filters_path):
+            with open(filters_path, 'r', encoding='utf-8') as f:
+                json_filters = json.load(f)
+            logger.info(f"Loaded filters from: {filters_path}")
+        else:
+            logger.warning(f"Filters file not found: {filters_path}")
+
+        if os.path.exists(sensitive_path):
+            with open(sensitive_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                for table, rules in data.items():
+                    json_sensitive[table] = {}
+                    for col, val in rules.items():
+                        if isinstance(val, list) and len(val) >= 2:
+                            json_sensitive[table][col] = (val[0], val[1])
+            logger.info(f"Loaded sensitive columns from: {sensitive_path}")
+        else:
+            logger.warning(f"Sensitive columns file not found: {sensitive_path}")
+
+        if not json_filters and not json_sensitive:
+            raise FileNotFoundError(
+                f"找不到設定檔：\n  {filters_path}\n  {sensitive_path}"
+            )
+
+        # Get current selected tables to preserve selection state
+        selected_set, existing_filters, existing_pii, _ = self.get_project_config(project_id)
+
+        # Merge: imported data overwrites existing
+        existing_filters.update(json_filters)
+        existing_pii.update(json_sensitive)
+
+        self.save_project_state(
+            project_id,
+            list(selected_set),
+            existing_filters,
+            existing_pii
+        )
+        logger.info(f"Imported config into project {project_id}")
+
