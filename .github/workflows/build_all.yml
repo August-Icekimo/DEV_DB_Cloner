@@ -44,6 +44,8 @@ jobs:
           --hidden-import=pymssql \
           --hidden-import=sqlalchemy.dialects.mssql.pymssql \
           --collect-all pymssql \
+          --collect-all rich \
+          --collect-all textual \
           db_replicator.py
 
     - name: Upload Artifact
