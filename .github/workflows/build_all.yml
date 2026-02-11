@@ -39,7 +39,11 @@ jobs:
 
     - name: Build with PyInstaller
       run: |
-        pyinstaller --onefile --name ${{ matrix.asset_name }} --clean db_replicator.py
+        pyinstaller --onefile --name ${{ matrix.asset_name }} --clean \
+          --hidden-import=pymssql \
+          --hidden-import=sqlalchemy.dialects.mssql.pymssql \
+          --collect-all pymssql \
+          db_replicator.py
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
