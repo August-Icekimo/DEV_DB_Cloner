@@ -640,7 +640,7 @@ class ConfirmScreen(ModalScreen[bool]):
         self.dismiss(result)
 
 
-class FilterEditorScreen(ModalScreen[str | None]):
+class FilterEditorScreen(ModalScreen[Optional[str]]):
     """Modal screen for editing table filter condition"""
     
     CSS = """
@@ -708,7 +708,7 @@ class FilterEditorScreen(ModalScreen[str | None]):
         self.dismiss(text_area.text.strip())
 
 
-class PIIEditorScreen(ModalScreen[dict | None]):
+class PIIEditorScreen(ModalScreen[Optional[dict]]):
     """Modal screen for editing PII/sensitive column rules"""
     
     CSS = """
@@ -1080,7 +1080,7 @@ class TableSelector(App):
         
         current_filter = self.filters.get(self.current_table, "")
         
-        def on_filter_result(result: str | None) -> None:
+        def on_filter_result(result: Optional[str]) -> None:
             if result is not None:
                 if result:
                     self.filters[self.current_table] = result
@@ -1101,7 +1101,7 @@ class TableSelector(App):
         
         current_rules = self.pii_rules.get(self.current_table, {})
         
-        def on_pii_result(result: dict | None) -> None:
+        def on_pii_result(result: Optional[dict]) -> None:
             if result is not None:
                 if result:
                     self.pii_rules[self.current_table] = result
