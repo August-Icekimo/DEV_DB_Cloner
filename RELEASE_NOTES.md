@@ -1,3 +1,75 @@
+# 版本發佈 v1.1.0 (Release v1.1.0) — 2026-02-11
+
+## 零依賴靜態編譯、專案管理系統、UI 互動全面升級
+**feat: zero-dependency static build, SQLite project management, UI/UX overhaul**
+
+`feat: replace pyodbc with pymssql, add SQLite config manager, project import/export, interactive UI enhancements`
+
+---
+
+### 🔧 核心架構變更 (Core Architecture)
+
+1. **pyodbc → pymssql 遷移**
+   - 將資料庫連接從 `mssql+pyodbc` 改為 `mssql+pymssql`（TDS 協議直連）
+   - **完全移除 ODBC 驅動依賴**，實現真正的零依賴靜態編譯
+   - 更新 `requirements.txt`、`environment.yml`、`PACKAGING.md`
+
+2. **SQLite 專案設定管理 (ConfigManager)**
+   - 所有專案設定（篩選條件、PII 規則、選取狀態）統一儲存於 `config.db`
+   - 支援多專案管理（新建/複製/刪除/切換）
+   - Legacy JSON 設定檔自動遷移至 SQLite
+
+### ✨ 新功能 (New Features)
+
+3. **專案匯入/匯出 (Import/Export)**
+   - **匯出 (E)**: 將專案設定匯出為 `{專案名}_filters.json` + `{專案名}_sensitive_columns.json`
+   - **匯入 (I)**: 指定檔案名稱前綴，從 JSON 匯入設定到選定專案
+   - 新增 `ConfigManager.export_to_json()` / `import_from_json()` 方法
+
+4. **說明頁面 (Info Screen)**
+   - 新增 `Info.txt` 版本說明文件
+   - 按 `?` 開啟捲動式說明頁面，含版本資訊、快捷鍵列表、更新紀錄
+   - 按 `Q` 或 `ESC` 關閉
+
+5. **離開功能 (Exit)**
+   - 專案選擇畫面按 `X` 可直接離開程式
+
+### 🖱️ UI/UX 互動增強 (UI/UX Enhancements)
+
+6. **滑鼠雙擊支援**
+   - 專案列表雙擊即開啟專案
+   - 資料表選擇畫面左上角專案名稱可點擊返回專案選擇
+
+7. **Hover 互動效果**
+   - 專案名稱 Badge：hover 時背景變亮 + 加底線
+   - Column Header (TABLES/DATA_FILTERS/PII)：hover 時背景高亮 + 底線
+   - ListView 項目：hover 時顯示淡色背景
+   - Info-hints 標籤：hover 時文字變成警告色
+
+8. **專案選擇畫面第二列按鈕**
+   - 新增 匯入(I) / 匯出(E) / 離開(X) / 說明(?) 四個功能按鈕
+
+### 🐛 Bug 修復 (Bug Fixes)
+
+9. **確認畫面迴圈問題**
+   - 修復 `run_replication` 的 `while True` 迴圈缺少 `break`
+   - 按 Y 確認後不再回到專案選擇，正確進入複製流程
+
+### 📦 建置與打包 (Build & Packaging)
+
+10. **PyInstaller 靜態編譯修復**
+    - 新增 `--hidden-import=pymssql` / `sqlalchemy.dialects.mssql.pymssql`
+    - 新增 `--collect-all pymssql` / `rich` / `textual` 確保動態載入模組完整打包
+    - 修復 Windows PowerShell 換行問題（`shell: bash`）
+    - 修復 Python 3.9 相容性（`str | None` → `Optional[str]`）
+    - 移除 `unixodbc-dev` 系統依賴安裝步驟
+
+### 環境需求 (Prerequisites)
+- Python 3.9+
+- pymssql >= 2.2（透過 TDS 協議直連 SQL Server，無需 ODBC 驅動）
+- 執行檔模式下無需安裝任何額外套件
+
+---
 
 # 首次提交 / 版本發佈 v1.0.0 (First Commit / Release v1.0.0)
 
@@ -27,8 +99,6 @@
    * **`clear_content`**: 安全抹除高度敏感欄位（例如英文姓名）。
      `Securely scrubs highly sensitive fields (e.g., English Names).`
 
-
-
 3. **稽核與可追溯性 (Audit & Traceability)**:
    * **檔案記錄 (File Logging)**：生成每日日誌 (`YYYYMMDD_Clone.log`)，詳列執行步驟與資料範例。
      `Generates daily log files (YYYYMMDD_Clone.log) with detailed execution steps and data samples.`
@@ -55,35 +125,3 @@
 ### 環境需求 (Prerequisites)
 * Python 3.x
 * ODBC Driver 18 for SQL Server
-
-# First Commit / Release v1.0.0
-
-## Title
-feat: initial release of HRM DB Replicator with smart anonymization
-
-## Description
-This release introduces the `DEV_DB_Cloner` tool, a robust Python-based utility for replicating SQL Server databases with integrated PII protection.
-
-### Key Capabilities:
-1. **Interactive Selection**: Textual-based TUI for easy table selection.
-2. **Advanced Anonymization Engine**:
-   - `obfuscate_name`: Context-aware Chinese name generation based on character counts (2/3/4 chars).
-   - `obfuscate_spouse_name`: Salted logic to ensure spouse names differ from employee names.
-   - `obfuscate_address`: Full-width digit normalization and realistic address structure generation.
-   - `obfuscate_phone`: Preserves strict formatting while analyzing and masking the last 5 digits.
-   - `clear_content`: Securely scrubs highly sensitive fields (e.g., English Names).
-3. **Audit & Traceability**:
-   - **File Logging**: Generates daily log files (`YYYYMMDD_Clone.log`) with detailed execution steps and data samples.
-   - **Date-based Salt**: Injects execution date into anonymization seeds to ensure consistent results within the same day while varying across different days.
-4. **Data Integrity**:
-   - Enforces `NVARCHAR` mapping for all string columns to resolve Chinese encoding issues on SQL Server.
-   - Auto-initializes name corpus from source `EMP_DATA` for realistic test data generation.
-4. **Performance**: Batch processing with `tqdm` progress visualization.
-
-### Configuration
-- Pre-configured `SENSITIVE_COLUMNS` map for `EMP_DATA`, `ADVANCE_BONUS_GRANT`, and `DEPENDENT_DATA`.
-- Built-in filtering for large tables (e.g., Logs, Attendance) to optimize sync time.
-
-### Prerequisites
-- Python 3.x
-- ODBC Driver 18 for SQL Server
