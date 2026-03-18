@@ -850,6 +850,35 @@ class TableSelector(App):
         height: 1fr;
         padding: 0;
     }
+    #tab-bar {
+        height: 1;
+        padding: 0 1;
+        background: $surface-lighten-1;
+    }
+    .tab-label {
+        padding: 0 2;
+        content-align: center middle;
+    }
+    .tab-label-active {
+        text-style: bold;
+        color: $accent;
+    }
+    #ddl-column {
+        width: 3fr;
+        display: none;
+    }
+    #ddl-preview {
+        height: 1fr;
+        border: none;
+    }
+    #trigger-warning {
+        height: 2;
+        color: $warning;
+        text-style: bold;
+        border: solid $warning;
+        padding: 0 1;
+        display: none;
+    }
     .panel-lower-header {
         background: $accent-darken-2;
         text-style: bold;
@@ -899,61 +928,70 @@ class TableSelector(App):
     """
 
     BINDINGS = [
-        ("a", "select_all", "全選"),
-        ("space", "toggle_current", "選取"),
-        ("f", "edit_filter", "篩選"),
-        ("p", "edit_pii", "PII"),
+        Binding("a", "select_all", "全選"),
+        Binding("space", "toggle_current", "選取"),
+        Binding("f", "edit_filter", "篩選"),
+        Binding("p", "edit_pii", "PII"),
         Binding("o", "project_settings", "設定"),
-        ("s", "save_configs", "存檔"),
-        ("g", "initiate_confirm", "開始"),
+        Binding("s", "save_configs", "存檔"),
+        Binding("g", "initiate_confirm", "開始"),
+        Binding("1", "switch_tab_table", "Tables", show=False),
+        Binding("2", "switch_tab_view", "Views", show=False),
+        Binding("3", "switch_tab_sp", "SPs", show=False),
+        Binding("4", "switch_tab_function", "Functions", show=False),
+        Binding("5", "switch_tab_trigger", "Triggers", show=False),
         Binding("ctrl+o", "back_to_project", "切換專案", show=False),
         Binding("tab", "focus_next", "下個區域", show=False),
         Binding("shift+tab", "focus_previous", "上個區域", show=False),
-        ("q", "quit", "離開"),
+        Binding("q", "quit", "離開"),
     ]
 
-    def __init__(self, project_id: int, all_table_names: List[str], inspector=None):
+    def __init__(self, project_id: int, objects_dict: Dict[str, List[str]], inspector=None):
         super().__init__()
         self.project_id = project_id
         self.project = config_mgr.get_project_by_id(project_id)
-        self.table_names = all_table_names
+        
+        self.objects_dict = objects_dict
+        
         self.all_selected = False
-        self.current_table: Optional[str] = None
+        self.current_object: Optional[str] = None
         self.configs_modified = False
         self.inspector = inspector
         self.table_columns_cache: Dict[str, List[str]] = {}
         self.table_pk_cache: Dict[str, List[str]] = {}
 
-        # Load Config from DB
-        selected_set, self.filters, self.pii_rules, _ = config_mgr.get_project_config(project_id)
-        
-        # Determine initial checked state
+        self.current_tab: str = "TABLE"
+        self._load_config_for_tab()
+
+    def _load_config_for_tab(self):
+        selected_set, filters, pii_rules = config_mgr.get_project_config_by_type(self.project_id, self.current_tab)
         self.initial_checked = selected_set
+        if self.current_tab == "TABLE":
+            _, self.filters, self.pii_rules, _ = config_mgr.get_project_config(self.project_id)
 
     def on_mount(self) -> None:
+        self._refresh_tab_bar()
+        self._reload_object_list()
         self.query_one("#table-list", ListView).focus()
-        if self.table_names:
-            self.current_table = self.table_names[0]
-            self._update_side_panels()
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
+        with Horizontal(id="tab-bar"):
+            yield Label("", id="tab-table", classes="tab-label")
+            yield Label("", id="tab-view", classes="tab-label")
+            yield Label("", id="tab-sp", classes="tab-label")
+            yield Label("", id="tab-function", classes="tab-label")
+            yield Label("", id="tab-trigger", classes="tab-label")
+
         with Horizontal(classes="info-bar"):
             yield Button(f" 專案^O: {self.project.name} ", id="project-badge")
             yield Label(" Space_選取 F_篩選 P_PII O_設定 S_存檔 G_開始", id="info-hints")
         
         with Horizontal(id="columns-container"):
-            # Column 1: Tables
+            # Column 1: Objects (Tables/Views/SPs/Functions/Triggers)
             with Vertical(id="tables-column", classes="column"):
-                yield Label("📋 TABLES", classes="column-header")
-                items = []
-                for name in self.table_names:
-                    item = TableItem(name)
-                    if name in self.initial_checked:
-                        item.checked = True
-                        item.label.update(f"[x] {name}")
-                    items.append(item)
-                yield ListView(*items, id="table-list")
+                yield Label("📋 OBJECTS", id="list-header", classes="column-header")
+                yield ListView(id="table-list")
             
             # Column 2: DATA_FILTERS
             with Vertical(id="filters-column", classes="column"):
@@ -974,13 +1012,24 @@ class TableSelector(App):
                     yield Label("📋 All Columns", classes="panel-lower-header")
                     with ScrollableContainer(id="col-scroll", classes="metadata-scroll"):
                         yield Static("", id="column-list", classes="column-list")
+            
+            # Column 4: DDL PREVIEW & DEPENDENCIES
+            with Vertical(id="ddl-column", classes="column"):
+                yield Label("📄 DDL PREVIEW / 🔗 DEPENDENCIES", classes="column-header")
+                yield Label("⚠️  警告：複製 Trigger 可能干擾目標 DB 的資料寫入與複製流程，請謹慎評估。", id="trigger-warning")
+                with Vertical(classes="panel-upper"):
+                    yield TextArea("", read_only=True, id="ddl-preview")
+                with Vertical(classes="panel-lower"):
+                    yield Label("🔗 Dependencies", classes="panel-lower-header")
+                    with ScrollableContainer(id="dep-scroll", classes="metadata-scroll"):
+                        yield Static("", id="dep-list")
         
         yield Footer()
 
     def on_list_view_highlighted(self, event: ListView.Highlighted) -> None:
         """Update side panels when highlighted item changes"""
         if event.item and isinstance(event.item, TableItem):
-            self.current_table = event.item.table_name
+            self.current_object = event.item.table_name
             self._update_side_panels()
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -1007,56 +1056,145 @@ class TableSelector(App):
             self.table_pk_cache[table_name] = ["id", "seq_no"]
 
     def _update_side_panels(self) -> None:
-        if not self.current_table:
+        if not self.current_object:
             return
+        current_obj = self.current_object
         
-        self._load_table_metadata(self.current_table)
-        
-        # Update Filter Display
-        filter_display = self.query_one("#filter-display", Static)
-        filter_rule = self.filters.get(self.current_table)
-        if filter_rule:
-            filter_display.update(f"✅ WHERE:\n{filter_rule}")
-            filter_display.remove_class("no-rule")
-            filter_display.add_class("has-rule")
+        if self.current_tab == "TABLE":
+            self._load_table_metadata(current_obj)
+            
+            # Update Filter Display
+            filter_display = self.query_one("#filter-display", Static)
+            filter_rule = self.filters.get(current_obj)
+            if filter_rule:
+                filter_display.update(f"✅ WHERE:\n{filter_rule}")
+                filter_display.remove_class("no-rule")
+                filter_display.add_class("has-rule")
+            else:
+                filter_display.update("無篩選條件\n\n按 F 新增")
+                filter_display.remove_class("has-rule")
+                filter_display.add_class("no-rule")
+            
+            # Update Primary Keys
+            pk_list = self.query_one("#pk-list", Static)
+            pks = self.table_pk_cache.get(current_obj, [])
+            if pks:
+                pk_text = "\n".join([f"  • {pk}" for pk in pks])
+                pk_list.update(pk_text)
+            else:
+                pk_list.update("  (無主鍵)")
+            
+            # Update PII Display
+            pii_display = self.query_one("#pii-display", Static)
+            pii_rules = self.pii_rules.get(current_obj)
+            if pii_rules:
+                lines = ["✅ 去敏化規則:"]
+                for col, (func_name, seed_col) in pii_rules.items():
+                    seed_str = f" (seed: {seed_col})" if seed_col else ""
+                    lines.append(f"  • {col}: {func_name}{seed_str}")
+                pii_display.update("\n".join(lines))
+                pii_display.remove_class("no-rule")
+                pii_display.add_class("has-rule")
+            else:
+                pii_display.update("無去敏化規則\n\n按 P 新增")
+                pii_display.remove_class("has-rule")
+                pii_display.add_class("no-rule")
+            
+            # Update All Columns
+            column_list = self.query_one("#column-list", Static)
+            columns = self.table_columns_cache.get(current_obj, [])
+            if columns:
+                col_text = "\n".join([f"  • {col}" for col in columns])
+                column_list.update(col_text)
+            else:
+                column_list.update("  (無欄位資訊)")
         else:
-            filter_display.update("無篩選條件\n\n按 F 新增")
-            filter_display.remove_class("has-rule")
-            filter_display.add_class("no-rule")
+            if self.inspector:
+                engine = self.inspector.bind
+                ddl = fetch_ddl(engine, current_obj, self.current_tab)
+                deps = fetch_dependencies(engine, current_obj)
+            else:
+                ddl = f"-- Mock DDL for {current_obj}\nCREATE {self.current_tab} {current_obj} AS ...\n"
+                deps = [{"name": "MOCK_TABLE", "type": "TABLE"}]
+                
+            self.query_one("#ddl-preview", TextArea).load_text(ddl or "(無法取得定義)")
+            dep_text = "\n".join([f"  • {d['name']} ({d['type']})" for d in deps]) or "  (無相依物件)"
+            self.query_one("#dep-list", Static).update(dep_text)
+
+    def action_switch_tab_table(self): self._switch_tab("TABLE")
+    def action_switch_tab_view(self): self._switch_tab("VIEW")
+    def action_switch_tab_sp(self): self._switch_tab("SP")
+    def action_switch_tab_function(self): self._switch_tab("FUNCTION")
+    def action_switch_tab_trigger(self): self._switch_tab("TRIGGER")
+
+    def _switch_tab(self, tab_name: str) -> None:
+        self.action_save_configs()
+        self.current_tab = tab_name
+        is_table = (tab_name == "TABLE")
+
+        self.query_one("#filters-column").display = is_table
+        self.query_one("#pii-column").display = is_table
+        self.query_one("#ddl-column").display = not is_table
         
-        # Update Primary Keys
-        pk_list = self.query_one("#pk-list", Static)
-        pks = self.table_pk_cache.get(self.current_table, [])
-        if pks:
-            pk_text = "\n".join([f"  • {pk}" for pk in pks])
-            pk_list.update(pk_text)
-        else:
-            pk_list.update("  (無主鍵)")
+        trigger_warning = self.query_one("#trigger-warning", Label)
+        trigger_warning.display = (tab_name == "TRIGGER")
+
+        self.query_one("#list-header", Label).update(f"📋 {tab_name}S")
+
+        self._load_config_for_tab()
+        self._refresh_tab_bar()
+        self._reload_object_list()
+        self._clear_side_panels()
+
+    def _refresh_tab_bar(self) -> None:
+        tabs = {
+            "TABLE": ("tab-table", "[1] TABLES"),
+            "VIEW": ("tab-view", "[2] VIEWS"),
+            "SP": ("tab-sp", "[3] SPs"),
+            "FUNCTION": ("tab-function", "[4] FUNCTIONS"),
+            "TRIGGER": ("tab-trigger", "[5] TRIGGERS ⚠️")
+        }
+        for t_name, (lbl_id, base_text) in tabs.items():
+            lbl = self.query_one(f"#{lbl_id}", Label)
+            if t_name == self.current_tab:
+                parts = base_text.split(" ", 1)
+                lbl.update(f"{parts[0]} >> {parts[1]} <<")
+                lbl.add_class("tab-label-active")
+            else:
+                lbl.update(base_text)
+                lbl.remove_class("tab-label-active")
+
+    def _reload_object_list(self) -> None:
+        list_view = self.query_one("#table-list", ListView)
+        prev_index = list_view.index
+        list_view.clear()
         
-        # Update PII Display
-        pii_display = self.query_one("#pii-display", Static)
-        pii_rules = self.pii_rules.get(self.current_table)
-        if pii_rules:
-            lines = ["✅ 去敏化規則:"]
-            for col, (func_name, seed_col) in pii_rules.items():
-                seed_str = f" (seed: {seed_col})" if seed_col else ""
-                lines.append(f"  • {col}: {func_name}{seed_str}")
-            pii_display.update("\n".join(lines))
-            pii_display.remove_class("no-rule")
-            pii_display.add_class("has-rule")
+        objects = self.objects_dict.get(self.current_tab, [])
+        items = []
+        for name in objects:
+            item = TableItem(name)
+            if name in self.initial_checked:
+                item.checked = True
+                item.label.update(f"[x] {name}")
+            items.append(item)
+            
+        list_view.extend(items)
+        if objects:
+            if prev_index is not None and prev_index < len(objects):
+                list_view.index = prev_index
+            else:
+                list_view.index = 0
+            self.current_object = objects[list_view.index]
         else:
-            pii_display.update("無去敏化規則\n\n按 P 新增")
-            pii_display.remove_class("has-rule")
-            pii_display.add_class("no-rule")
-        
-        # Update All Columns
-        column_list = self.query_one("#column-list", Static)
-        columns = self.table_columns_cache.get(self.current_table, [])
-        if columns:
-            col_text = "\n".join([f"  • {col}" for col in columns])
-            column_list.update(col_text)
+            self.current_object = None
+        self._update_side_panels()
+
+    def _clear_side_panels(self) -> None:
+        if self.current_tab == "TABLE":
+            pass
         else:
-            column_list.update("  (無欄位資訊)")
+            self.query_one("#ddl-preview", TextArea).load_text("")
+            self.query_one("#dep-list", Static).update("")
 
     def action_toggle_current(self) -> None:
         list_view = self.query_one("#table-list", ListView)
@@ -1138,41 +1276,203 @@ class TableSelector(App):
                 if isinstance(item, TableItem) and item.checked
             ]
             
-            config_mgr.save_project_state(self.project_id, selected, self.filters, self.pii_rules)
+            config_mgr.save_project_state_by_type(self.project_id, self.current_tab, selected)
+            if self.current_tab == "TABLE":
+                config_mgr.save_project_state(self.project_id, selected, self.filters, self.pii_rules)
             
             self.configs_modified = False
-            self.notify(f"✅ 專案 [{self.project.name}] 設定已儲存 (DB)")
+            self.notify(f"✅ {self.current_tab} 設定已儲存 (DB)")
         except Exception as e:
             self.notify(f"❌ 儲存失敗: {e}", severity="error")
 
     def action_initiate_confirm(self) -> None:
-        list_view = self.query_one("#table-list", ListView)
-        selected_temp = [
-            item.table_name for item in list_view.children 
-            if isinstance(item, TableItem) and item.checked
-        ]
+        self.action_save_configs()
         
-        if not selected_temp:
-            self.notify("請至少選擇一個資料表！", severity="error")
+        payload = {}
+        for t in ["TABLE", "VIEW", "SP", "FUNCTION", "TRIGGER"]:
+            sel, _, _ = config_mgr.get_project_config_by_type(self.project_id, t)
+            payload[t.lower() + "s"] = list(sel)
+            
+        total_selected = sum(len(v) for v in payload.values())
+        if total_selected == 0:
+            self.notify("請至少選擇一個物件！", severity="error")
             return
 
         warning = ""
-        # Auto-save before running? Or warn?
-        # Let's auto-save for convenience
-        self.action_save_configs()
-        
-        if self.configs_modified:
-            warning = "\n\n⚠️ (Warning: Unsaved changes? logic error?)"
+        if payload.get("triggers"):
+            warning = "\n\n⚠️ 已選取 Trigger，複製時可能影響資料寫入，確定繼續？"
 
-        msg = f"已選擇 {len(selected_temp)} 個資料表。\n設定已自動儲存。\n\n確定要開始嗎？"
+        msg = f"已選擇：\n"
+        msg += f"  資料表：{len(payload.get('tables', []))} 個\n"
+        msg += f"  檢視表：{len(payload.get('views', []))} 個\n"
+        msg += f"  預存程序：{len(payload.get('sps', []))} 個\n"
+        msg += f"  函數：{len(payload.get('functions', []))} 個\n"
+        msg += f"  觸發器：{len(payload.get('triggers', []))} 個{'  ⚠️' if payload.get('triggers') else ''}\n"
+        msg += warning
         
         def check_confirm(is_confirmed: bool) -> None:
             if is_confirmed:
-                self.exit(selected_temp) # Return the tables to process
+                self.exit(payload)
         
         self.push_screen(ConfirmScreen(msg), check_confirm)
 
-# --- Core Logic ---
+# --- Core Logic & Object Handling ---
+
+def fetch_all_views(engine) -> List[str]:
+    """使用 SQLAlchemy Inspector"""
+    insp = inspect(engine)
+    return sorted(insp.get_view_names())
+
+def fetch_all_sps(engine) -> List[str]:
+    query = "SELECT name FROM sys.objects WHERE type = 'P' AND is_ms_shipped = 0 ORDER BY name"
+    with engine.connect() as conn:
+        return [row[0] for row in conn.execute(text(query))]
+
+def fetch_all_functions(engine) -> List[str]:
+    query = "SELECT name FROM sys.objects WHERE type IN ('FN', 'IF', 'TF') AND is_ms_shipped = 0 ORDER BY name"
+    with engine.connect() as conn:
+        return [row[0] for row in conn.execute(text(query))]
+
+def fetch_all_triggers(engine) -> List[str]:
+    query = "SELECT name FROM sys.triggers WHERE is_ms_shipped = 0 ORDER BY name"
+    with engine.connect() as conn:
+        return [row[0] for row in conn.execute(text(query))]
+
+def fetch_ddl(engine, object_name: str, object_type: str) -> str:
+    """
+    Views / SPs / Functions：使用 OBJECT_DEFINITION(OBJECT_ID(name))
+    Triggers：同上，但加入 parent table 資訊說明
+    回傳原始 CREATE 語法字串
+    """
+    query = f"SELECT OBJECT_DEFINITION(OBJECT_ID('{object_name}'))"
+    with engine.connect() as conn:
+        result = conn.execute(text(query)).scalar()
+        if not result:
+            return ""
+        if object_type == "TRIGGER":
+            parent_q = f"SELECT OBJECT_NAME(parent_id) FROM sys.triggers WHERE object_id = OBJECT_ID('{object_name}')"
+            parent = conn.execute(text(parent_q)).scalar()
+            return f"-- TRIGGER FOR TABLE: {parent}\n{result}"
+        return result
+
+def fetch_dependencies(engine, object_name: str) -> List[Dict[str, str]]:
+    """
+    查詢 sys.sql_expression_dependencies
+    回傳 [{"name": "EMP_DATA", "type": "TABLE"}, ...]
+    """
+    query = f"""
+        SELECT referenced_entity_name, referenced_class_desc 
+        FROM sys.sql_expression_dependencies 
+        WHERE referencing_id = OBJECT_ID('{object_name}')
+    """
+    with engine.connect() as conn:
+        deps = []
+        for row in conn.execute(text(query)):
+            deps.append({"name": row[0], "type": row[1] or "UNKNOWN"})
+        return deps
+
+def preprocess_ddl(ddl: str, src_db: str, tgt_db: str) -> str:
+    """
+    用 regex 替換三段式名稱中的來源 DB 名稱為目標 DB 名稱
+    例：[hrm].[dbo].[vw_Emp] → [hrm_dev].[dbo].[vw_Emp]
+    """
+    import re
+    if not ddl:
+        return ""
+    pattern = re.compile(re.escape(f"[{src_db}]"), re.IGNORECASE)
+    return pattern.sub(f"[{tgt_db}]", ddl)
+
+def topological_sort(objects: List[str], engine) -> List[str]:
+    """
+    利用 sys.sql_expression_dependencies 建立相依圖
+    回傳符合建立順序的物件名稱清單
+    Cycle 偵測：若發現循環相依，記錄 warning 並跳過排序
+    """
+    adj = {obj: [] for obj in objects}
+    indegree = {obj: 0 for obj in objects}
+
+    for obj in objects:
+        deps = fetch_dependencies(engine, obj)
+        for d in deps:
+            dep_name = d["name"]
+            if dep_name in objects:
+                adj[dep_name].append(obj)
+                indegree[obj] += 1
+
+    queue = [obj for obj in objects if indegree[obj] == 0]
+    sorted_objects = []
+
+    while queue:
+        curr = queue.pop(0)
+        sorted_objects.append(curr)
+        for neighbor in adj[curr]:
+            indegree[neighbor] -= 1
+            if indegree[neighbor] == 0:
+                queue.append(neighbor)
+
+    if len(sorted_objects) != len(objects):
+        logger.warning("Topological sort detected a cycle. Skipping strict sorting for some objects.")
+        for obj in objects:
+            if obj not in sorted_objects:
+                sorted_objects.append(obj)
+
+    return sorted_objects
+
+def clone_views(selected_views: List[str], src_engine, tgt_engine, src_db: str, tgt_db: str) -> None:
+    if not selected_views: return
+    sorted_views = topological_sort(selected_views, src_engine)
+    logger.info(f"開始複製 Views ({len(sorted_views)} 個)")
+    for view in sorted_views:
+        try:
+            ddl = fetch_ddl(src_engine, view, "VIEW")
+            ddl = preprocess_ddl(ddl, src_db, tgt_db)
+            drop_stmt = f"IF OBJECT_ID('{view}', 'V') IS NOT NULL DROP VIEW {view};"
+            with tgt_engine.connect() as conn:
+                conn.execute(text(drop_stmt))
+                if ddl.strip():
+                    conn.execute(text(ddl))
+                conn.commit()
+            logger.info(f"✅ View {view} 複製成功")
+        except Exception as e:
+            logger.error(f"❌ View {view} 複製失敗: {e}")
+
+def clone_sps_and_functions(selected: List[str], src_engine, tgt_engine, src_db: str, tgt_db: str, is_func: bool) -> None:
+    if not selected: return
+    sorted_objs = topological_sort(selected, src_engine)
+    obj_type_str = "Function" if is_func else "Stored Procedure"
+    logger.info(f"開始複製 {obj_type_str}s ({len(sorted_objs)} 個)")
+    
+    for obj in sorted_objs:
+        try:
+            ddl = fetch_ddl(src_engine, obj, "FUNCTION" if is_func else "SP")
+            ddl = preprocess_ddl(ddl, src_db, tgt_db)
+            drop_type = "FUNCTION" if is_func else "PROCEDURE"
+            drop_stmt = f"IF OBJECT_ID('{obj}') IS NOT NULL AND OBJECTPROPERTY(OBJECT_ID('{obj}'), 'IsMSShipped') = 0 DROP {drop_type} {obj};"
+            with tgt_engine.connect() as conn:
+                conn.execute(text(drop_stmt))
+                if ddl.strip():
+                    conn.execute(text(ddl))
+                conn.commit()
+            logger.info(f"✅ {obj_type_str} {obj} 複製成功")
+        except Exception as e:
+            logger.error(f"❌ {obj_type_str} {obj} 複製失敗: {e}")
+
+def clone_triggers(selected_triggers: List[str], src_engine, tgt_engine, src_db: str, tgt_db: str) -> None:
+    if not selected_triggers: return
+    logger.warning(f"⚠️ 注意：開始複製 Triggers ({len(selected_triggers)} 個)，請確認其對目標 DB 寫入無干擾。")
+    for obj in selected_triggers:
+        try:
+            ddl = fetch_ddl(src_engine, obj, "TRIGGER")
+            ddl = preprocess_ddl(ddl, src_db, tgt_db)
+            drop_stmt = f"IF OBJECT_ID('{obj}', 'TR') IS NOT NULL DROP TRIGGER {obj};"
+            with tgt_engine.connect() as conn:
+                conn.execute(text(drop_stmt))
+                if ddl.strip():
+                    conn.execute(text(ddl))
+                conn.commit()
+            logger.info(f"✅ Trigger {obj} 複製成功")
+        except Exception as e:
+            logger.error(f"❌ Trigger {obj} 複製失敗: {e}")
 
 def get_db_connection(args=None):
     """Setup source and target database connections based on configuration"""
@@ -1228,11 +1528,11 @@ def get_db_connection(args=None):
         with tgt_engine.connect() as conn:
             logger.info("✅ 目標資料庫連線成功！")
             
-        return src_engine, tgt_engine
+        return src_engine, tgt_engine, src_config['database'], tgt_config['database']
         
     except Exception as e:
         logger.error(f"❌ 資料庫連線失敗: {e}")
-        return None, None
+        return None, None, "", ""
 
 def apply_anonymization(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
     """Apply anonymization rules to the DataFrame"""
@@ -1300,7 +1600,7 @@ def run_replication(args=None):
         LARGE_TABLE_FILTERS = filters
 
         # --- Step 2: DB Connection & Name Init ---
-        source_engine, target_engine = get_db_connection(args)
+        source_engine, target_engine, src_db, tgt_db = get_db_connection(args)
 
         if source_engine:
             try:
@@ -1320,33 +1620,52 @@ def run_replication(args=None):
             mock_tables.extend(LARGE_TABLE_FILTERS.keys()) 
             mock_tables.extend(SENSITIVE_COLUMNS.keys())
             all_tables = sorted(list(set(mock_tables)))
+            objects_dict = {
+                "TABLE": all_tables,
+                "VIEW": [f"VW_DEMO_{i}" for i in range(1, 10)],
+                "SP": [f"USP_DEMO_{i}" for i in range(1, 10)],
+                "FUNCTION": [f"UDF_DEMO_{i}" for i in range(1, 10)],
+                "TRIGGER": [f"TRG_DEMO_{i}" for i in range(1, 10)]
+            }
             insp = None
         else:
-            logger.info("正在讀取資料表清單...")
+            logger.info("正在讀取資料庫物件清單...")
             insp = inspect(source_engine)
             all_tables = sorted(insp.get_table_names())
+            objects_dict = {
+                "TABLE": all_tables,
+                "VIEW": fetch_all_views(source_engine),
+                "SP": fetch_all_sps(source_engine),
+                "FUNCTION": fetch_all_functions(source_engine),
+                "TRIGGER": fetch_all_triggers(source_engine)
+            }
 
-        # --- Step 3: Table Selection (Configured with Project) ---
-        app = TableSelector(project_id, all_tables, inspector=insp)
-        selected_tables = app.run()
+        # --- Step 3: Object Selection (Configured with Project) ---
+        app = TableSelector(project_id, objects_dict, inspector=insp)
+        payload = app.run()
 
         # Check if user wants to go back to Project Selector
-        if selected_tables == "__BACK_TO_PROJECT__":
+        if payload == "__BACK_TO_PROJECT__":
             logger.info("返回專案選擇...")
             continue
 
-        if not selected_tables:
-            logger.info("未選擇任何資料表，程式結束。")
+        if not isinstance(payload, dict):
+            logger.info("未選擇任何物件，程式結束。")
             return
     
         break  # Exit the while loop → proceed to clone
     # Reload Config just in case user changed it in TableSelector
-    # We do this because TableSelector might have saved new filters/PII
     _, filters, pii_rules, _ = config_mgr.get_project_config(project_id)
     SENSITIVE_COLUMNS = pii_rules
     LARGE_TABLE_FILTERS = filters
 
-    logger.info(f"\n已選擇 {len(selected_tables)} 個資料表，準備開始複製...\n")
+    selected_tables = list(payload.get("tables", []))
+    selected_views = list(payload.get("views", []))
+    selected_funcs = list(payload.get("functions", []))
+    selected_sps = list(payload.get("sps", []))
+    selected_triggers = list(payload.get("triggers", []))
+    
+    logger.info(f"\n準備開始複製...\n")
     
     # 4. 處理複製
     for table in selected_tables:
@@ -1365,9 +1684,6 @@ def run_replication(args=None):
         try:
             if source_engine and target_engine:
                 # 真實執行
-                # 計算總筆數 (使用 pandas read_sql 可能較慢，優化可改用 text 直接查詢)
-                #total_count = pd.read_sql(count_query, source_engine).iloc[0, 0] 
-                # 使用 connection 執行 scalar 查詢優化效能
                 with source_engine.connect() as conn:
                     total_count = conn.execute(text(count_query)).scalar()
 
@@ -1377,9 +1693,7 @@ def run_replication(args=None):
                         # 套用去識別化
                         chunk = apply_anonymization(chunk, table)
                         
-                        # Fix encoding issues for Chinese characters:
-                        # Map all object (string) columns to NVARCHAR explicitly
-                        # Include both 'object' and 'str' to support Pandas 3.x+ string dtypes
+                        # Fix encoding issues for Chinese characters
                         dtype_map = {c: NVARCHAR for c in chunk.select_dtypes(include=['object', 'str']).columns}
 
                         # 寫入目標資料庫
@@ -1397,6 +1711,25 @@ def run_replication(args=None):
         except Exception as e:
             logger.error(f"❌ 處理 {table} 時發生錯誤: {e}")
             continue
+
+    if source_engine and target_engine:
+        # Phase 2: Views
+        if selected_views:
+            clone_views(selected_views, source_engine, target_engine, src_db, tgt_db)
+
+        # Phase 3: Functions (before SPs)
+        if selected_funcs:
+            clone_sps_and_functions(selected_funcs, source_engine, target_engine, src_db, tgt_db, is_func=True)
+
+        # Phase 3: SPs
+        if selected_sps:
+            clone_sps_and_functions(selected_sps, source_engine, target_engine, src_db, tgt_db, is_func=False)
+
+        # Phase 4: Triggers
+        if selected_triggers:
+            clone_triggers(selected_triggers, source_engine, target_engine, src_db, tgt_db)
+    else:
+        logger.info("Demo 模式：略過 View / SP / Function / Trigger 的實際複製")
     
     logger.info("\n所有作業完成！")
 

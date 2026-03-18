@@ -38,6 +38,7 @@ class ProjectTable(Base):
     id = Column(Integer, primary_key=True)
     project_id = Column(Integer, ForeignKey('projects.id'), nullable=False)
     table_name = Column(String, nullable=False)
+    object_type = Column(String, default="TABLE") # 'TABLE' | 'VIEW' | 'SP' | 'FUNCTION' | 'TRIGGER'
     is_selected = Column(Boolean, default=False)
     filter_clause = Column(String, nullable=True) # SQL WHERE clause
     
@@ -229,8 +230,83 @@ class ConfigManager:
                 logger.error(f"Failed to save project state: {e}")
                 raise
 
+    def get_project_config_by_type(self, project_id: int, object_type: str):
+        """
+        同 get_project_config，但只回傳指定 object_type 的物件清單。
+        回傳: (selected_set, filters_dict, sensitive_columns_dict)
+        Views/SPs/Functions/Triggers 的 filters 與 sensitive_columns 永遠為空。
+        """
+        with self.get_session() as session:
+            project = session.get(Project, project_id)
+            if not project:
+                return set(), {}, {}
+
+            selected_objects = set()
+            filters = {}
+            sensitive_columns = {}
+            
+            for pt in project.tables:
+                if pt.object_type == object_type:
+                    if pt.is_selected:
+                        selected_objects.add(pt.table_name)
+                    
+                    if pt.filter_clause:
+                        filters[pt.table_name] = pt.filter_clause
+                    
+                    sc_map = {}
+                    for sc in pt.sensitive_columns:
+                        sc_map[sc.column_name] = (sc.function_name, sc.seed_column)
+                    
+                    if sc_map:
+                        sensitive_columns[pt.table_name] = sc_map
+
+            return selected_objects, filters, sensitive_columns
+
+    def save_project_state_by_type(self, project_id: int, object_type: str, selected_objects: List[str]):
+        """
+        儲存指定 object_type 的選取狀態。
+        不影響其他 object_type 的設定。
+        """
+        with self.get_session() as session:
+            try:
+                project = session.get(Project, project_id)
+                if not project:
+                    raise ValueError(f"Project ID {project_id} not found")
+
+                existing_objects = {pt.table_name: pt for pt in project.tables if pt.object_type == object_type}
+                all_involved_objects = set(selected_objects)
+                
+                project.updated_at = datetime.now()
+
+                for obj_name in all_involved_objects:
+                    pt = existing_objects.get(obj_name)
+                    if not pt:
+                        pt = ProjectTable(project_id=project_id, table_name=obj_name, object_type=object_type)
+                        session.add(pt)
+                    
+                    pt.is_selected = True
+                
+                for obj_name, pt in existing_objects.items():
+                    if obj_name not in all_involved_objects:
+                        pt.is_selected = False
+                
+                session.commit()
+                logger.info(f"Saved project state for {object_type} in project {project_id}")
+
+            except Exception as e:
+                session.rollback()
+                logger.error(f"Failed to save {object_type} state: {e}")
+                raise
+
     def migrate_json_if_needed(self):
         """Convert legacy JSON files to Default Project if DB is empty"""
+        with self.get_session() as session:
+            try:
+                session.execute(text("ALTER TABLE project_tables ADD COLUMN object_type VARCHAR DEFAULT 'TABLE'"))
+                session.commit()
+            except Exception:
+                session.rollback() # Ignore if column already exists
+
         # Check if DB is empty
         projects = self.get_all_projects()
         if projects:
@@ -314,6 +390,7 @@ class ConfigManager:
                 new_pt = ProjectTable(
                     project_id=new_project.id,
                     table_name=pt.table_name,
+                    object_type=pt.object_type,
                     is_selected=pt.is_selected,
                     filter_clause=pt.filter_clause
                 )
