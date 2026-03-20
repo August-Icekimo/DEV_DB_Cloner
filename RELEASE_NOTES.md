@@ -1,3 +1,36 @@
+# 版本發佈 v1.2.2 (Release v1.2.2) — 2026-03-20
+
+## 新增連線設定視窗 (Connection Manager) 與逐專案連線管理
+**feat: per-project DB connection manager with interactive TUI modal**
+
+---
+
+### 1. ConnectionScreen 連線設定視窗（新增）
+- 按 **(L)** 或點擊「連線設定」按鈕開啟 Modal 視窗
+- 可獨立填寫**來源 / 目標**資料庫的 Server、Database、UID、Password
+- 密碼欄位預設遮罩，按 **👁** 即時切換顯示（Textual reactive，無 DOM 操作）
+- 每組連線旁均有**非阻塞測試按鈕**（asyncio worker + ThreadPoolExecutor，10 秒 timeout）
+- **[儲存並連線]** / **[🎭 Demo 模式]** / **[取消]** 三個動作按鈕
+
+### 2. config.db 自動遷移（無損升級）
+- `projects` 資料表新增 9 個欄位：`src_server`、`src_database`、`src_uid`、`src_pwd`、`tgt_server`、`tgt_database`、`tgt_uid`、`tgt_pwd`、`demo_mode`
+- **啟動時自動執行 `PRAGMA table_info` 偵測 + `ALTER TABLE` 補欄**，舊 `config.db` 無需手動 SQL
+- 複製專案 (C) 同步複製連線憑證
+- 匯出 JSON 不含密碼欄位
+
+### 3. 連線流程重構
+- `get_db_connection()` **移除硬編碼帳密**，改從專案設定讀取
+- 優先順序：CLI 參數 > 環境變數 > 專案設定
+- 密碼特殊字元以 `urllib.parse.quote_plus` 處理，pymssql 直接接收原始密碼
+- `run_replication()` 連線失敗時**不再靜默切換 Demo 模式**，改提示 `(L) 修正` 並返回專案選擇
+- 保留 `--demo` CLI flag 向下相容
+
+### 4. UI 修正
+- Dialog 寬度從 88 縮至 **76**，適應 80 欄標準終端機（內容區 70 欄）
+- Dialog 高度改為 `auto / max-height: 100%`，24 行終端可滾動
+
+---
+
 # 版本發佈 v1.2.0 (Release v1.2.0) — 2026-03-20
 
 ## 完成了一系列 TUI 介面優化、功能增強以及主題化工程

@@ -6,6 +6,12 @@
 
 - **互動式 TUI 介面**: 使用 Textual 框架提供終端機圖形介面，方便選擇要複製的資料表。
 - **多專案管理**: 透過 SQLite 管理多組專案設定，支援匯入/匯出 JSON。
+- **逐專案連線設定 (Connection Manager)** _(v1.2.2 新增)_:
+  - 按 **`L`** 開啟互動式連線設定畫面，填入 Source / Target DB 連線資訊並另存於專案。
+  - 密碼欄位遮罩，可按 👁 切換顯示，**不寫入任何日誌**。
+  - 獨立測試連線按鈕，10 秒非阻塞測試。
+  - 支援 **[Demo 模式]** 按鈕，無需連線即可操作介面。
+  - 連線失敗時不再靜默切換 Demo，改提示使用者 `(L)` 修正後重試。
 - **自動去識別化 (Smart Anonymization)**:
   - **姓名混淆**: 基於真實姓名統計資料庫或來源資料庫動態產生的字庫，並支援配偶姓名區隔邏輯。
   - **地址處理**: 支援全形轉半形、縣市識別，並隨機產生行政區與門牌號碼。
@@ -53,11 +59,12 @@
 
 #### 重要：備份 `config.db`
 
-- 程式會在執行目錄下自動產生 `config.db`（SQLite），儲存你的所有專案設定。
+- 程式會在執行目錄下自動產生 `config.db`（SQLite），儲存你的所有專案設定（含連線資訊）。
 - **升級版本或搬移目錄時，請一併攜帶 `config.db`**，否則專案設定會遺失。
-- **(v1.2.0 升級須知)** 若您從舊版升級，請手動執行以下指令將資料庫結構升級：
+- **(v1.2.2 升級須知)** `config.db` 欄位遷移**全自動**，啟動程式即完成，無需手動 SQL。
+- **(v1.2.0 升級須知)** 若您從 v1.1.x 升級至 v1.2.0，請手動執行以下指令：
   ```bash
-  sqlite3 config.db "ALTER TABLE project_tables ADD COLUMN object_type VARCHAR DEFAULT 'TABLE'; UPDATE project_tables SET object_type = 'TABLE' WHERE object_type IS NULL; SELECT id, table_name, object_type FROM project_tables LIMIT 10;"
+  sqlite3 config.db "ALTER TABLE project_tables ADD COLUMN object_type VARCHAR DEFAULT 'TABLE'; UPDATE project_tables SET object_type = 'TABLE' WHERE object_type IS NULL;"
   ```
 - 你也可以透過 `匯出 (E)` 功能將設定備份為 JSON 檔案，之後再用 `匯入 (I)` 還原。
 
@@ -106,6 +113,7 @@ python db_replicator.py
 1. **專案選擇畫面** — 選擇或管理專案
    - `N` 新建 / `C` 複製 / `O` 開啟 / `D` 刪除
    - `I` 匯入設定 / `E` 匯出設定 / `?` 說明 / `X` 離開
+   - **`L` 連線設定** _(v1.2.2)_ — 開啟 ConnectionScreen，填入 Source/Target DB 連線資訊
 
 2. **物件選擇畫面 (Table/View/SP...)** — 選取要複製的資料庫物件
    - **分頁切換**：`1` Tables / `2` Views / `3` Stored Procedures / `4` Functions / `5` Triggers
@@ -117,7 +125,11 @@ python db_replicator.py
 ### Demo 模式
 模擬複製過程而不實際連接資料庫：
 ```bash
+# CLI 方式（向下相容）
 python db_replicator.py --demo
+
+# TUI 方式（v1.2.2 新增）
+# 在 ProjectSelector 按 L → 點擊 [🎭 Demo 模式]
 ```
 
 ## 設定與客制化 (Configuration)
