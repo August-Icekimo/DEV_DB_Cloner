@@ -381,11 +381,323 @@ class ImportPrefixScreen(ModalScreen[str]):
         self.dismiss(None)
 
 
+class ConnectionScreen(ModalScreen):
+    """Modal screen for editing per-project connection settings (v1.2.2)"""
+
+    CSS = """
+    ConnectionScreen {
+        align: center middle;
+    }
+    #conn-dialog {
+        width: 88;
+        height: 40;
+        border: thick $primary;
+        background: $surface;
+        padding: 1 2;
+        overflow-y: auto;
+    }
+    .conn-title {
+        text-style: bold;
+        color: $accent;
+        margin-bottom: 1;
+    }
+    .section-header {
+        text-style: bold reverse;
+        background: $primary-darken-2;
+        padding: 0 1;
+        margin-top: 1;
+    }
+    .field-row {
+        height: 3;
+        margin: 0;
+    }
+    .field-label {
+        width: 14;
+        content-align: right middle;
+        padding-right: 1;
+    }
+    .field-input {
+        width: 1fr;
+    }
+    .eye-btn {
+        width: 3;
+        min-width: 3;
+        margin-left: 1;
+        background: $surface-darken-1;
+    }
+    .status-bar {
+        height: 1;
+        margin: 0 0 1 0;
+        padding: 0 1;
+        color: $text-muted;
+    }
+    .test-row {
+        height: 3;
+        align: right middle;
+        margin: 0 0 1 0;
+    }
+    .btn-test {
+        min-width: 20;
+        background: $secondary;
+    }
+    #conn-actions {
+        height: 4;
+        align: center middle;
+        margin-top: 1;
+        border-top: solid $primary;
+    }
+    #conn-actions Button {
+        margin: 0 1;
+        min-width: 20;
+    }
+    #btn-save-conn { background: $success; }
+    #btn-demo-conn { background: $warning; color: $background; }
+    #btn-cancel-conn { background: $surface-darken-2; }
+    """
+
+    BINDINGS = [
+        ("escape", "cancel_conn", "取消"),
+        ("enter",  "save_conn",   "儲存"),
+    ]
+
+    def __init__(self, project_id: int) -> None:
+        super().__init__()
+        self.project_id = project_id
+        self.project = config_mgr.get_project_by_id(project_id)
+        self._cfg = config_mgr.get_connection_config(project_id)
+        # Track masked state
+        self._src_pwd_masked = True
+        self._tgt_pwd_masked = True
+        # Track test-in-progress state
+        self._src_testing = False
+        self._tgt_testing = False
+
+    # ------------------------------------------------------------------
+    # Compose
+    # ------------------------------------------------------------------
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="conn-dialog"):
+            yield Label(f"🔌 連線設定: {self.project.name}", classes="conn-title")
+
+            # ── Source Section ──
+            yield Label(" 📤 來源資料庫 (Source) ", classes="section-header")
+            with Horizontal(classes="field-row"):
+                yield Label("Server:", classes="field-label")
+                yield Input(value=self._cfg["src_server"], placeholder="IP / Hostname",
+                            id="src-server", classes="field-input")
+            with Horizontal(classes="field-row"):
+                yield Label("Database:", classes="field-label")
+                yield Input(value=self._cfg["src_database"], placeholder="資料庫名稱",
+                            id="src-database", classes="field-input")
+            with Horizontal(classes="field-row"):
+                yield Label("UID:", classes="field-label")
+                yield Input(value=self._cfg["src_uid"], placeholder="使用者帳號",
+                            id="src-uid", classes="field-input")
+            with Horizontal(classes="field-row", id="src-pwd-row"):
+                yield Label("Password:", classes="field-label")
+                yield Input(value=self._cfg["src_pwd"], placeholder="密碼",
+                            password=True, id="src-pwd", classes="field-input")
+                yield Button("👁", id="btn-eye-src", classes="eye-btn")
+            yield Label("", id="src-status", classes="status-bar")
+            with Horizontal(classes="test-row"):
+                yield Button("[測試來源連線]", id="btn-test-src", classes="btn-test")
+
+            # ── Target Section ──
+            yield Label(" 📥 目標資料庫 (Target) ", classes="section-header")
+            with Horizontal(classes="field-row"):
+                yield Label("Server:", classes="field-label")
+                yield Input(value=self._cfg["tgt_server"], placeholder="IP / Hostname",
+                            id="tgt-server", classes="field-input")
+            with Horizontal(classes="field-row"):
+                yield Label("Database:", classes="field-label")
+                yield Input(value=self._cfg["tgt_database"], placeholder="資料庫名稱",
+                            id="tgt-database", classes="field-input")
+            with Horizontal(classes="field-row"):
+                yield Label("UID:", classes="field-label")
+                yield Input(value=self._cfg["tgt_uid"], placeholder="使用者帳號",
+                            id="tgt-uid", classes="field-input")
+            with Horizontal(classes="field-row", id="tgt-pwd-row"):
+                yield Label("Password:", classes="field-label")
+                yield Input(value=self._cfg["tgt_pwd"], placeholder="密碼",
+                            password=True, id="tgt-pwd", classes="field-input")
+                yield Button("👁", id="btn-eye-tgt", classes="eye-btn")
+            yield Label("", id="tgt-status", classes="status-bar")
+            with Horizontal(classes="test-row"):
+                yield Button("[測試目標連線]", id="btn-test-tgt", classes="btn-test")
+
+            # ── Action Buttons ──
+            with Horizontal(id="conn-actions"):
+                yield Button("💾 儲存並連線 [Enter]", id="btn-save-conn",  variant="success")
+                yield Button("🎭 Demo 模式",          id="btn-demo-conn",  variant="warning")
+                yield Button("✖ 取消 [Esc]",          id="btn-cancel-conn", variant="default")
+
+    def on_mount(self) -> None:
+        # Notify user if all connection fields are empty (first use)
+        cfg = self._cfg
+        if not any([cfg["src_server"], cfg["src_uid"], cfg["tgt_server"], cfg["tgt_uid"]]):
+            self.notify("💡 請填入連線資訊或選擇 Demo 模式", severity="information", timeout=6)
+
+    # ------------------------------------------------------------------
+    # Password toggle — remount widget to flip password= attribute
+    # ------------------------------------------------------------------
+
+    def _toggle_password(self, side: str) -> None:
+        """Toggle display of password field for 'src' or 'tgt'."""
+        field_id = f"{side}-pwd"
+        row_id   = f"{side}-pwd-row"
+        is_masked_attr = f"_{side}_pwd_masked"
+
+        current_input = self.query_one(f"#{field_id}", Input)
+        current_value = current_input.value
+        currently_masked = getattr(self, is_masked_attr)
+        new_masked = not currently_masked
+        setattr(self, is_masked_attr, new_masked)
+
+        row = self.query_one(f"#{row_id}")
+        new_input = Input(
+            value=current_value,
+            placeholder="密碼",
+            password=new_masked,
+            id=field_id,
+            classes="field-input",
+        )
+        current_input.remove()
+        eye_btn = self.query_one(f"#btn-eye-{side}", Button)
+        row.mount(new_input, before=eye_btn)
+        new_input.focus()
+
+    # ------------------------------------------------------------------
+    # Button handler
+    # ------------------------------------------------------------------
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        bid = event.button.id
+        if bid == "btn-eye-src":
+            self._toggle_password("src")
+        elif bid == "btn-eye-tgt":
+            self._toggle_password("tgt")
+        elif bid == "btn-test-src":
+            if not self._src_testing:
+                self._src_testing = True
+                event.button.disabled = True
+                self.query_one("#src-status", Label).update("⏳ 測試中...")
+                self.run_worker(self._test_connection("src"), exclusive=False)
+        elif bid == "btn-test-tgt":
+            if not self._tgt_testing:
+                self._tgt_testing = True
+                event.button.disabled = True
+                self.query_one("#tgt-status", Label).update("⏳ 測試中...")
+                self.run_worker(self._test_connection("tgt"), exclusive=False)
+        elif bid == "btn-save-conn":
+            self._do_save()
+        elif bid == "btn-demo-conn":
+            self._do_demo()
+        elif bid == "btn-cancel-conn":
+            self.dismiss(None)
+
+    # ------------------------------------------------------------------
+    # Async test connection (non-blocking)
+    # ------------------------------------------------------------------
+
+    async def _test_connection(self, side: str) -> None:
+        """Test a DB connection asynchronously; updates status label on completion.
+        Runs pymssql (sync) in a threadpool to avoid blocking the event loop.
+        Timeout: 10 seconds.
+        """
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        import urllib.parse
+
+        server   = self.query_one(f"#{side}-server",   Input).value.strip()
+        database = self.query_one(f"#{side}-database",  Input).value.strip()
+        uid      = self.query_one(f"#{side}-uid",       Input).value.strip()
+        pwd      = self.query_one(f"#{side}-pwd",       Input).value  # keep as-is
+
+        status_label = self.query_one(f"#{side}-status", Label)
+        btn_id = f"btn-test-{side}"
+
+        def do_connect():
+            # Build pymssql connection directly (simpler for a quick ping)
+            import pymssql
+            conn = pymssql.connect(
+                server=server,
+                database=database,
+                user=uid,
+                password=pwd,  # pymssql accepts raw password with special chars
+                login_timeout=10,
+            )
+            conn.close()
+
+        try:
+            loop = asyncio.get_event_loop()
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                await asyncio.wait_for(
+                    loop.run_in_executor(pool, do_connect),
+                    timeout=10.0
+                )
+            status_label.update("✅ 連線成功")
+        except asyncio.TimeoutError:
+            status_label.update("❌ 連線逾時 (10s)")
+        except Exception as exc:
+            # Truncate long driver error messages
+            msg = str(exc)[:80]
+            status_label.update(f"❌ {msg}")
+        finally:
+            # Re-enable the test button
+            try:
+                self.query_one(f"#{btn_id}", Button).disabled = False
+            except Exception:
+                pass
+            if side == "src":
+                self._src_testing = False
+            else:
+                self._tgt_testing = False
+
+    # ------------------------------------------------------------------
+    # Save / Demo / Cancel actions
+    # ------------------------------------------------------------------
+
+    def _collect_fields(self) -> dict:
+        return {
+            "src_server":   self.query_one("#src-server",   Input).value.strip(),
+            "src_database": self.query_one("#src-database",  Input).value.strip(),
+            "src_uid":      self.query_one("#src-uid",       Input).value.strip(),
+            "src_pwd":      self.query_one("#src-pwd",       Input).value,
+            "tgt_server":   self.query_one("#tgt-server",   Input).value.strip(),
+            "tgt_database": self.query_one("#tgt-database",  Input).value.strip(),
+            "tgt_uid":      self.query_one("#tgt-uid",       Input).value.strip(),
+            "tgt_pwd":      self.query_one("#tgt-pwd",       Input).value,
+            "demo_mode":    False,
+        }
+
+    def _do_save(self) -> None:
+        fields = self._collect_fields()
+        if not fields["src_server"] or not fields["src_uid"]:
+            self.notify("❌ 來源 Server 與 UID 為必填", severity="error")
+            return
+        if not fields["tgt_server"] or not fields["tgt_uid"]:
+            self.notify("❌ 目標 Server 與 UID 為必填", severity="error")
+            return
+        config_mgr.save_connection_config(self.project_id, fields)
+        self.dismiss("SAVED")
+
+    def _do_demo(self) -> None:
+        config_mgr.save_connection_config(self.project_id, {"demo_mode": True})
+        self.dismiss("DEMO")
+
+    def action_save_conn(self) -> None:
+        self._do_save()
+
+    def action_cancel_conn(self) -> None:
+        self.dismiss(None)
+
+
 class ProjectSelector(App):
     """App to select or manage projects"""
     CSS = """
     Screen { align: center middle; }
-    #main-container { width: 64; height: 24; border: thick $primary; background: $surface; padding: 1 2; }
+    #main-container { width: 64; height: 26; border: thick $primary; background: $surface; padding: 1 2; }
     .title {
         width: 100%;
         content-align: center middle;
@@ -399,13 +711,14 @@ class ProjectSelector(App):
     """
 
     BINDINGS = [
-        ("n", "new_project", "(N)ew"),
-        ("c", "copy_project", "(C)opy"),
-        ("o", "open_project", "(O)pen"),
-        ("d", "drop_project", "(D)rop"),
-        ("i", "import_config", "(I)mport"),
-        ("e", "export_config", "(E)xport"),
-        ("x", "exit_app", "e(X)it"),
+        ("n", "new_project",        "(N)ew"),
+        ("c", "copy_project",        "(C)opy"),
+        ("o", "open_project",        "(O)pen"),
+        ("d", "drop_project",        "(D)rop"),
+        ("i", "import_config",       "(I)mport"),
+        ("e", "export_config",       "(E)xport"),
+        ("l", "connection_settings", "(L)連線"),
+        ("x", "exit_app",            "e(X)it"),
         ("question_mark", "show_info", "(?)"),
     ]
 
@@ -444,6 +757,7 @@ class ProjectSelector(App):
             Horizontal(
                 Button("匯入\n(I)mport", variant="primary", id="import"),
                 Button("匯出\n(E)xport", variant="primary", id="export"),
+                Button("連線\n(L)", variant="primary", id="conn"),
                 Button("離開\ne(X)it", variant="error", id="exit"),
                 Button("說明\n(?)", variant="default", id="info"),
                 id="buttons2"
@@ -480,6 +794,8 @@ class ProjectSelector(App):
             self._do_import()
         elif event.button.id == "export":
             self._do_export()
+        elif event.button.id == "conn":
+            self.action_connection_settings()
         elif event.button.id == "exit":
             self.exit(None)
         elif event.button.id == "info":
@@ -540,6 +856,23 @@ class ProjectSelector(App):
 
     def action_show_info(self) -> None:
         self.push_screen(InfoScreen())
+
+    def action_connection_settings(self) -> None:
+        """Open ConnectionScreen for the currently selected project (L binding)."""
+        list_view = self.query_one("#proj-list", ListView)
+        if list_view.index is None:
+            self.notify("請先選擇專案", severity="warning")
+            return
+        project = self.projects[list_view.index]
+
+        def _on_conn_result(result):
+            # result is "SAVED", "DEMO", or None
+            if result == "SAVED":
+                self.notify("✅ 連線設定已儲存")
+            elif result == "DEMO":
+                self.notify("🎭 Demo 模式已設定")
+
+        self.push_screen(ConnectionScreen(project.id), _on_conn_result)
 
     def _do_import(self):
         list_view = self.query_one("#proj-list", ListView)
@@ -1474,40 +1807,61 @@ def clone_triggers(selected_triggers: List[str], src_engine, tgt_engine, src_db:
         except Exception as e:
             logger.error(f"❌ Trigger {obj} 複製失敗: {e}")
 
-def get_db_connection(args=None):
-    """Setup source and target database connections based on configuration"""
+def get_db_connection(args=None, project=None):
+    """
+    Setup source and target database connections.
+    Priority for each field:
+      1. CLI arg (--src-server etc.)
+      2. Project stored config (project.src_server etc.)
+      3. Environment variable (SRC_DB_SERVER etc.)
+      4. Empty string (no hardcoded defaults)
+    If project.demo_mode is True and no CLI args override -> returns (None, None, "", "").
+    Special characters in passwords are handled by urllib.parse.quote_plus in the connection URL;
+    pymssql.connect() receives the raw password directly when testing.
+    """
+    import urllib.parse
+
     print("\n--- 設定資料庫連線 ---")
 
-    def get_conf(arg_name, env_name, default_val):
-        # Priority: CLI Arg > Env Var > Default
+    # Load project stored values (if available)
+    proj_cfg = {}
+    if project is not None:
+        proj_cfg = config_mgr.get_connection_config(project.id)
+
+    # Explicit demo mode: project flag set and no CLI override
+    cli_has_src = args and any(getattr(args, k, None) for k in
+                               ["src_server", "src_database", "src_uid", "src_pwd"])
+    if project is not None and proj_cfg.get("demo_mode") and not cli_has_src:
+        logger.info("🎭 Demo 模式（專案設定）")
+        return None, None, "", ""
+
+    def get_conf(arg_name, env_name, proj_key, default_val=""):
+        # Priority: CLI Arg > Env Var > Project Config > Default
         if args and getattr(args, arg_name, None):
             return getattr(args, arg_name)
-        return os.environ.get(env_name, default_val)
-    
+        env_val = os.environ.get(env_name)
+        if env_val:
+            return env_val
+        return proj_cfg.get(proj_key, default_val)
+
     # Source Database Configuration
     src_config = {
-        'server': get_conf('src_server', 'SRC_DB_SERVER', '172.22.1.34'),
-        'database': get_conf('src_database', 'SRC_DB_NAME', 'hrm'),
-        'uid': get_conf('src_uid', 'SRC_DB_UID', 'yr3158'),
-        'pwd': get_conf('src_pwd', 'SRC_DB_PWD', 'Vita0309'),
+        'server':   get_conf('src_server',   'SRC_DB_SERVER', 'src_server'),
+        'database': get_conf('src_database',  'SRC_DB_NAME',   'src_database'),
+        'uid':      get_conf('src_uid',       'SRC_DB_UID',    'src_uid'),
+        'pwd':      get_conf('src_pwd',       'SRC_DB_PWD',    'src_pwd'),
     }
 
     # Target Database Configuration
     tgt_config = {
-        'server': get_conf('tgt_server', 'TGT_DB_SERVER', 'localhost'),
-        'database': get_conf('tgt_database', 'TGT_DB_NAME', 'hrm'),
-        'uid': get_conf('tgt_uid', 'TGT_DB_UID', 'sa'),
-        'pwd': get_conf('tgt_pwd', 'TGT_DB_PWD', 'No@KeyTakeaway'),
+        'server':   get_conf('tgt_server',   'TGT_DB_SERVER', 'tgt_server'),
+        'database': get_conf('tgt_database',  'TGT_DB_NAME',   'tgt_database'),
+        'uid':      get_conf('tgt_uid',       'TGT_DB_UID',    'tgt_uid'),
+        'pwd':      get_conf('tgt_pwd',       'TGT_DB_PWD',    'tgt_pwd'),
     }
 
-    
-    # Construct Connection Strings
-    # Format: mssql+pymssql://uid:pwd@server/database
-    
-    import urllib.parse
-
     def build_conn_str(cfg):
-        # Encode password to handle special characters (e.g., '@')
+        # Passwords may contain '@', '#', '%' etc. — always percent-encode for the URL.
         encoded_pwd = urllib.parse.quote_plus(cfg['pwd'])
         return f"mssql+pymssql://{cfg['uid']}:{encoded_pwd}@{cfg['server']}/{cfg['database']}"
 
@@ -1516,20 +1870,18 @@ def get_db_connection(args=None):
 
     logger.info(f"來源 (Source): {src_config['server']} ({src_config['uid']})")
     logger.info(f"目標 (Target): {tgt_config['server']} ({tgt_config['uid']})")
-    
+
     try:
         src_engine = create_engine(src_conn_str)
-        # Verify source connection
         with src_engine.connect() as conn:
             logger.info("✅ 來源資料庫連線成功！")
-            
+
         tgt_engine = create_engine(tgt_conn_str)
-        # Verify target connection
         with tgt_engine.connect() as conn:
             logger.info("✅ 目標資料庫連線成功！")
-            
+
         return src_engine, tgt_engine, src_config['database'], tgt_config['database']
-        
+
     except Exception as e:
         logger.error(f"❌ 資料庫連線失敗: {e}")
         return None, None, "", ""
@@ -1582,49 +1934,72 @@ def apply_anonymization(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
     return df
 
 def run_replication(args=None):
+    # Check if --demo CLI flag is set (global override)
+    cli_demo = args and getattr(args, 'demo', False)
+
     while True:
         # --- Step 1: Project Selector ---
         proj_app = ProjectSelector()
         project_id = proj_app.run()
-        
+
         if not project_id:
             logger.info("未選擇專案，結束。")
             return
 
-        # Load Project Config to prep for execution context
+        # Load the full project object
+        project = config_mgr.get_project_by_id(project_id)
+
+        # Load Project Config for execution context
         _, filters, pii_rules, name_source = config_mgr.get_project_config(project_id)
-        
-        # Update globals for apply_anonymization and execution usage
+
+        # Update globals for apply_anonymization
         global SENSITIVE_COLUMNS, LARGE_TABLE_FILTERS
         SENSITIVE_COLUMNS = pii_rules
         LARGE_TABLE_FILTERS = filters
 
-        # --- Step 2: DB Connection & Name Init ---
-        source_engine, target_engine, src_db, tgt_db = get_db_connection(args)
+        # --- Step 2: DB Connection ---
+        # Pass project to get_db_connection; CLI --demo bypasses it by passing project=None
+        conn_project = None if cli_demo else project
+        source_engine, target_engine, src_db, tgt_db = get_db_connection(args, conn_project)
 
+        # Determine if we are in demo mode
+        proj_cfg = config_mgr.get_connection_config(project_id)
+        is_demo = cli_demo or (proj_cfg.get("demo_mode") and not source_engine)
+
+        if not source_engine and not is_demo:
+            # Real connection attempt failed: do NOT silently enter demo mode.
+            # Warn the user and loop back to ProjectSelector.
+            msg = ("❌ 無法建立資料庫連線，請至連線設定 (L) 修正")
+            logger.warning(msg)
+            print(f"\n{msg}\n")
+            continue  # back to ProjectSelector
+
+        # Initialize name data
         if source_engine:
             try:
                 initialize_name_data(
-                    source_engine, 
-                    source_type=name_source['type'], 
+                    source_engine,
+                    source_type=name_source['type'],
                     source_value=name_source['value']
                 )
             except Exception as e:
                 logger.warning(f"⚠️ Warning: Failed to initialize name data: {e}")
         else:
             initialize_name_data(None)
-        
-        if not source_engine or not target_engine:
-            logger.warning("⚠️ 無法建立有效連線，切換至 [Demo 模式]...")
-            mock_tables = [f"TABLE_{i:03d}" for i in range(1, 251)] 
-            mock_tables.extend(LARGE_TABLE_FILTERS.keys()) 
+
+        # Build objects dict
+        if not source_engine:
+            # Demo mode
+            logger.warning("⚠️ 進入 [Demo 模式]")
+            mock_tables = [f"TABLE_{i:03d}" for i in range(1, 251)]
+            mock_tables.extend(LARGE_TABLE_FILTERS.keys())
             mock_tables.extend(SENSITIVE_COLUMNS.keys())
             all_tables = sorted(list(set(mock_tables)))
             objects_dict = {
-                "TABLE": all_tables,
-                "VIEW": [f"VW_DEMO_{i}" for i in range(1, 10)],
-                "SP": [f"USP_DEMO_{i}" for i in range(1, 10)],
-                "FUNCTION": [f"UDF_DEMO_{i}" for i in range(1, 10)],
+                "TABLE":   all_tables,
+                "VIEW":    [f"VW_DEMO_{i}" for i in range(1, 10)],
+                "SP":      [f"USP_DEMO_{i}" for i in range(1, 10)],
+                "FUNCTION":[f"UDF_DEMO_{i}" for i in range(1, 10)],
                 "TRIGGER": [f"TRG_DEMO_{i}" for i in range(1, 10)]
             }
             insp = None
@@ -1633,14 +2008,14 @@ def run_replication(args=None):
             insp = inspect(source_engine)
             all_tables = sorted(insp.get_table_names())
             objects_dict = {
-                "TABLE": all_tables,
-                "VIEW": fetch_all_views(source_engine),
-                "SP": fetch_all_sps(source_engine),
+                "TABLE":    all_tables,
+                "VIEW":     fetch_all_views(source_engine),
+                "SP":       fetch_all_sps(source_engine),
                 "FUNCTION": fetch_all_functions(source_engine),
-                "TRIGGER": fetch_all_triggers(source_engine)
+                "TRIGGER":  fetch_all_triggers(source_engine)
             }
 
-        # --- Step 3: Object Selection (Configured with Project) ---
+        # --- Step 3: Object Selection ---
         app = TableSelector(project_id, objects_dict, inspector=insp)
         payload = app.run()
 
@@ -1652,8 +2027,8 @@ def run_replication(args=None):
         if not isinstance(payload, dict):
             logger.info("未選擇任何物件，程式結束。")
             return
-    
-        break  # Exit the while loop → proceed to clone
+
+        break  # Exit loop → proceed to clone
     # Reload Config just in case user changed it in TableSelector
     _, filters, pii_rules, _ = config_mgr.get_project_config(project_id)
     SENSITIVE_COLUMNS = pii_rules
