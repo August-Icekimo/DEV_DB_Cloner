@@ -466,9 +466,6 @@ class ConnectionScreen(ModalScreen):
         self.project_id = project_id
         self.project = config_mgr.get_project_by_id(project_id)
         self._cfg = config_mgr.get_connection_config(project_id)
-        # Track masked state
-        self._src_pwd_masked = True
-        self._tgt_pwd_masked = True
         # Track test-in-progress state
         self._src_testing = False
         self._tgt_testing = False
@@ -540,33 +537,13 @@ class ConnectionScreen(ModalScreen):
             self.notify("💡 請填入連線資訊或選擇 Demo 模式", severity="information", timeout=6)
 
     # ------------------------------------------------------------------
-    # Password toggle — remount widget to flip password= attribute
+    # Password toggle — flip Input.password reactive (Textual 8.x)
     # ------------------------------------------------------------------
 
     def _toggle_password(self, side: str) -> None:
-        """Toggle display of password field for 'src' or 'tgt'."""
-        field_id = f"{side}-pwd"
-        row_id   = f"{side}-pwd-row"
-        is_masked_attr = f"_{side}_pwd_masked"
-
-        current_input = self.query_one(f"#{field_id}", Input)
-        current_value = current_input.value
-        currently_masked = getattr(self, is_masked_attr)
-        new_masked = not currently_masked
-        setattr(self, is_masked_attr, new_masked)
-
-        row = self.query_one(f"#{row_id}")
-        new_input = Input(
-            value=current_value,
-            placeholder="密碼",
-            password=new_masked,
-            id=field_id,
-            classes="field-input",
-        )
-        current_input.remove()
-        eye_btn = self.query_one(f"#btn-eye-{side}", Button)
-        row.mount(new_input, before=eye_btn)
-        new_input.focus()
+        """Toggle masking of the password field by flipping the reactive attribute."""
+        inp = self.query_one(f"#{side}-pwd", Input)
+        inp.password = not inp.password
 
     # ------------------------------------------------------------------
     # Button handler
