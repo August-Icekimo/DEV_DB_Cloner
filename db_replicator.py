@@ -389,8 +389,9 @@ class ConnectionScreen(ModalScreen):
         align: center middle;
     }
     #conn-dialog {
-        width: 88;
-        height: 40;
+        width: 76;
+        height: auto;
+        max-height: 100%;
         border: thick $primary;
         background: $surface;
         padding: 1 2;
@@ -412,7 +413,7 @@ class ConnectionScreen(ModalScreen):
         margin: 0;
     }
     .field-label {
-        width: 14;
+        width: 12;
         content-align: right middle;
         padding-right: 1;
     }
