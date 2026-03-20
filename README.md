@@ -55,6 +55,10 @@
 
 - 程式會在執行目錄下自動產生 `config.db`（SQLite），儲存你的所有專案設定。
 - **升級版本或搬移目錄時，請一併攜帶 `config.db`**，否則專案設定會遺失。
+- **(v1.2.0 升級須知)** 若您從舊版升級，請手動執行以下指令將資料庫結構升級：
+  ```bash
+  sqlite3 config.db "ALTER TABLE project_tables ADD COLUMN object_type VARCHAR DEFAULT 'TABLE'; UPDATE project_tables SET object_type = 'TABLE' WHERE object_type IS NULL; SELECT id, table_name, object_type FROM project_tables LIMIT 10;"
+  ```
 - 你也可以透過 `匯出 (E)` 功能將設定備份為 JSON 檔案，之後再用 `匯入 (I)` 還原。
 
 ---
@@ -103,9 +107,10 @@ python db_replicator.py
    - `N` 新建 / `C` 複製 / `O` 開啟 / `D` 刪除
    - `I` 匯入設定 / `E` 匯出設定 / `?` 說明 / `X` 離開
 
-2. **資料表選擇畫面** — 選取要複製的資料表
+2. **物件選擇畫面 (Table/View/SP...)** — 選取要複製的資料庫物件
+   - **分頁切換**：`1` Tables / `2` Views / `3` Stored Procedures / `4` Functions / `5` Triggers
    - `Space` 選取 / `A` 全選 / `F` 篩選條件 / `P` PII 規則
-   - `S` 儲存 / `G` 開始複製 / `Q` 離開
+   - `Ctrl+O` 返回專案 / `S` 儲存 / `G` 開始複製 / `Q` 離開
 
 3. **執行複製** — 批次讀取、去敏化、寫入目標資料庫
 

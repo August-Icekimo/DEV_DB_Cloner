@@ -1,3 +1,42 @@
+# 版本發佈 v1.2.0 (Release v1.2.0) — 2026-03-20
+
+## 完成了一系列 TUI 介面優化、功能增強以及主題化工程
+**feat: TUI interface optimization, feature enhancement and theming**
+
+---
+
+### 1. 核心 Bug 修正
+- 修正 `ProjectSelector` 誤植與嵌套方法的問題，將 `TableItem` 正確分離為獨立元件，解決啟動崩潰。
+
+### 2. 專案選擇器 (Project Selector) 強化
+- **功能擴充**：新增「複製專案」按鈕，可深層複製所有資料表選取、篩選條件及 PII 規則。
+- **介面優化**：
+    - 按鈕採用中英對照並顯示快捷鍵提示 (N/C/O/D)。
+    - 實作完整鍵盤快捷鍵綁定。
+    - 專案清單高度固定為 7 行並支援捲軸。
+    - 實作光棒選取效果，啟動時自動聚焦第一項。
+
+### 3. 設定畫面 (Project Settings) 改造
+- **標籤式切換**：姓名來源改用類似分頁標籤的選單，並支援藍白色系動態切換效果。
+- **輸入優化**：更換為單行 `Input` 元件，優化輸入體驗。
+- **按鈕與快捷鍵**：重新設計灰底 (Cancel) 與綠底 (Save) 按鈕，並支援 C 與 S 快捷鍵。
+
+### 4. 流程與導覽增強
+- **返回功能**：在 Table Selector 畫面新增 `Ctrl+O` 快捷鍵，可直接返回專案選擇清單。
+- **主迴圈重構**：調整 `run_replication` 執行流程，支援無縫切換專案。
+
+### 5. 主題化與標準化
+- **顏色系統**：全面移除硬編碼顏色代碼，改用 Textual 官方 **Design Tokens** (如 `$primary`, `$success`)，確保 App 能完美適配深色/淺色主題。
+- **文件規範**：新增 `schema.md`，依照統一格式完整定義 `config.db` 的欄位結構與 ER 關係。
+
+### 舊資料庫升級指令 (Upgrade Database)
+若您從舊版升級至 v1.2.0，請手動更新 `config.db` 結構以支援新欄位：
+```bash
+sqlite3 config.db "ALTER TABLE project_tables ADD COLUMN object_type VARCHAR DEFAULT 'TABLE'; UPDATE project_tables SET object_type = 'TABLE' WHERE object_type IS NULL; SELECT id, table_name, object_type FROM project_tables LIMIT 10;"
+```
+
+---
+
 # 版本發佈 v1.1.0 (Release v1.1.0) — 2026-02-11
 
 ## 零依賴靜態編譯、專案管理系統、UI 互動全面升級
