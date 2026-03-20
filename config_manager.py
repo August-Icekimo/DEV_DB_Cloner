@@ -27,6 +27,17 @@ class Project(Base):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now, onupdate=datetime.now)
 
+    # --- Connection Settings (v1.2.2) ---
+    src_server   = Column(String, nullable=True)
+    src_database = Column(String, nullable=True)
+    src_uid      = Column(String, nullable=True)
+    src_pwd      = Column(String, nullable=True)  # plaintext; internal tool only
+    tgt_server   = Column(String, nullable=True)
+    tgt_database = Column(String, nullable=True)
+    tgt_uid      = Column(String, nullable=True)
+    tgt_pwd      = Column(String, nullable=True)  # plaintext; internal tool only
+    demo_mode    = Column(Boolean, default=False)
+
     tables = relationship("ProjectTable", back_populates="project", cascade="all, delete-orphan")
 
     def __repr__(self):
@@ -73,9 +84,40 @@ class ConfigManager:
         self.engine = create_engine(f"sqlite:///{self.DB_FILE}")
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
+        self._migrate_connection_columns()
 
     def get_session(self) -> Session:
         return self.Session()
+
+    def _migrate_connection_columns(self):
+        """
+        Idempotent migration: add the 9 connection columns introduced in v1.2.2
+        to an existing 'projects' table that may not have them yet.
+        Uses raw SQLite PRAGMA to detect missing columns, then ALTER TABLE.
+        Safe to call multiple times — errors from already-existing columns are silently ignored.
+        """
+        new_columns = [
+            ("src_server",   "VARCHAR"),
+            ("src_database", "VARCHAR"),
+            ("src_uid",      "VARCHAR"),
+            ("src_pwd",      "VARCHAR"),
+            ("tgt_server",   "VARCHAR"),
+            ("tgt_database", "VARCHAR"),
+            ("tgt_uid",      "VARCHAR"),
+            ("tgt_pwd",      "VARCHAR"),
+            ("demo_mode",    "BOOLEAN DEFAULT 0"),
+        ]
+        from sqlalchemy import text as _text
+        with self.engine.connect() as conn:
+            existing = {row[1] for row in conn.execute(_text("PRAGMA table_info(projects)"))}
+            for col_name, col_type in new_columns:
+                if col_name not in existing:
+                    try:
+                        conn.execute(_text(f"ALTER TABLE projects ADD COLUMN {col_name} {col_type}"))
+                        conn.commit()
+                        logger.info(f"Migration: added column projects.{col_name}")
+                    except Exception as exc:
+                        logger.warning(f"Migration: could not add {col_name}: {exc}")
 
     def get_all_projects(self) -> List[Project]:
         """Return list of all projects"""
@@ -368,19 +410,76 @@ class ConfigManager:
                 project.name_source_value = name_source_value
                 session.commit()
 
+    def get_connection_config(self, project_id: int) -> dict:
+        """
+        Return per-project connection settings as a plain dict.
+        Missing / NULL fields return "" (str) or False (bool).
+        Raises ValueError for unknown project_id.
+        """
+        with self.get_session() as session:
+            project = session.get(Project, project_id)
+            if not project:
+                raise ValueError(f"Project ID {project_id} not found")
+            return {
+                "src_server":   project.src_server   or "",
+                "src_database": project.src_database or "",
+                "src_uid":      project.src_uid      or "",
+                "src_pwd":      project.src_pwd      or "",
+                "tgt_server":   project.tgt_server   or "",
+                "tgt_database": project.tgt_database or "",
+                "tgt_uid":      project.tgt_uid      or "",
+                "tgt_pwd":      project.tgt_pwd      or "",
+                "demo_mode":    project.demo_mode    if project.demo_mode is not None else False,
+            }
+
+    def save_connection_config(self, project_id: int, config: dict) -> None:
+        """
+        Persist connection settings for a project.
+        Partial dict is accepted — only provided keys are updated.
+        Raises ValueError for unknown project_id.
+        Passwords are stored as-is (plaintext); special characters are handled safely
+        via ORM attribute assignment (no string interpolation).
+        """
+        allowed_keys = {
+            "src_server", "src_database", "src_uid", "src_pwd",
+            "tgt_server", "tgt_database", "tgt_uid", "tgt_pwd",
+            "demo_mode",
+        }
+        with self.get_session() as session:
+            project = session.get(Project, project_id)
+            if not project:
+                raise ValueError(f"Project ID {project_id} not found")
+            for key, value in config.items():
+                if key in allowed_keys:
+                    setattr(project, key, value)
+            session.commit()
+            # Log without exposing password values
+            safe_keys = {k: ("***" if "pwd" in k else v) for k, v in config.items() if k in allowed_keys}
+            logger.info(f"Saved connection config for project {project_id}: {safe_keys}")
+
     def clone_project(self, source_project_id: int, new_name: str) -> Project:
-        """Clone an existing project with all its table configs and PII rules"""
+        """Clone an existing project with all its table configs, PII rules, and connection settings."""
         with self.get_session() as session:
             source = session.get(Project, source_project_id)
             if not source:
                 raise ValueError(f"Source project ID {source_project_id} not found")
 
-            # Create new project with same settings
+            # Create new project with same settings (including connection config)
             new_project = Project(
                 name=new_name,
                 description=f"Cloned from [{source.name}]",
                 name_source_type=source.name_source_type,
-                name_source_value=source.name_source_value
+                name_source_value=source.name_source_value,
+                # Connection settings — copied as confirmed by operator
+                src_server=source.src_server,
+                src_database=source.src_database,
+                src_uid=source.src_uid,
+                src_pwd=source.src_pwd,
+                tgt_server=source.tgt_server,
+                tgt_database=source.tgt_database,
+                tgt_uid=source.tgt_uid,
+                tgt_pwd=source.tgt_pwd,
+                demo_mode=source.demo_mode,
             )
             session.add(new_project)
             session.flush()  # Get new_project.id
