@@ -71,6 +71,11 @@ jobs:
         with:
           path: ./all-artifacts
 
+      - name: Zip Windows Executable
+        run: |
+          cd ./all-artifacts/DB_Cloner_Windows
+          zip DB_Cloner_Windows.zip DB_Cloner_Windows.exe
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -79,7 +84,7 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            ./all-artifacts/DB_Cloner_Windows/DB_Cloner_Windows.exe
+            ./all-artifacts/DB_Cloner_Windows/DB_Cloner_Windows.zip
             ./all-artifacts/DB_Cloner_macOS/DB_Cloner_macOS
             ./all-artifacts/DB_Cloner_Linux/DB_Cloner_Linux
         env:
