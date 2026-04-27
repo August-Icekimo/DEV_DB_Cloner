@@ -318,6 +318,49 @@ def obfuscate_address(address: str, seed: any) -> str:
         return address
 
 
+# EMP_FAMILY relationship codes that are NOT children/dependents
+_NON_CHILD_CODES = {'$', 'C', 'D'}
+
+def obfuscate_family_name(name: str, composite_seed: str) -> str:
+    """
+    專為 EMP_FAMILY 設計的眷屬姓名混淆函數。
+    composite_seed 格式："{emp_no}|{relationship}|{member_index}"
+
+    子女關係 (E~Z)：繼承員工的虛擬姓氏，確保同一家庭同姓。
+    配偶($)、父母(C/D)：各自獨立產生新姓氏。
+    """
+    if not name or not composite_seed:
+        return name
+
+    try:
+        parts = composite_seed.split('|')
+        if len(parts) < 3:
+            return name
+        emp_no, rel_code, idx_str = parts[0], parts[1], parts[2]
+        member_index = int(idx_str) if idx_str.isdigit() else 0
+
+        # 員工本人的虛擬姓氏（與 obfuscate_name 使用相同 seed，確保父子同姓）
+        emp_rng = random.Random(hash(emp_no))
+        emp_surname = emp_rng.choice(SURNAMES)
+
+        if rel_code in _NON_CHILD_CODES:
+            # 配偶或父母：獨立姓氏
+            surname_rng = random.Random(hash(f"{emp_no}_{rel_code}_surname"))
+            surname = surname_rng.choice(SURNAMES)
+        else:
+            # 子女或撫養關係：繼承員工虛擬姓氏
+            surname = emp_surname
+
+        # 名字：依 (emp_no, relationship, member_index) 唯一決定
+        given_rng = random.Random(hash(f"{emp_no}_{rel_code}_{member_index}_given"))
+        given_name = given_rng.choice(GIVEN_NAMES)
+
+        return surname + given_name
+
+    except Exception:
+        return name
+
+
 def clear_content(val: str, seed: any = None) -> str:
     """
     清空內容，回傳空字串
