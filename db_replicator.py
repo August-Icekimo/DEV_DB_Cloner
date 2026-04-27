@@ -2085,9 +2085,12 @@ def run_replication(args=None):
         # 檢查是否有篩選條件
         where_clause = LARGE_TABLE_FILTERS.get(table)
         if where_clause:
+            import re
             logger.info(f"  -> 套用篩選條件: {where_clause}")
             query = f"SELECT * FROM {table} WHERE {where_clause}"
-            count_query = f"SELECT COUNT(*) FROM {table} WHERE {where_clause}"
+            # 移除 ORDER BY 以避免 COUNT 查詢錯誤
+            count_where = re.split(r'\s+ORDER\s+BY\s+', where_clause, flags=re.IGNORECASE)[0]
+            count_query = f"SELECT COUNT(*) FROM {table} WHERE {count_where}"
         else:
             query = f"SELECT * FROM {table}"
             count_query = f"SELECT COUNT(*) FROM {table}"
