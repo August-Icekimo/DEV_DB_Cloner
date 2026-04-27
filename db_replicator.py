@@ -70,9 +70,9 @@ from sqlalchemy import create_engine, text, inspect
 from sqlalchemy.types import NVARCHAR
 from tqdm import tqdm
 from data_anonymizer import (
-    obfuscate_name, anonymize_id, obfuscate_address, 
+    obfuscate_name, anonymize_id, obfuscate_address,
     initialize_name_data, obfuscate_spouse_name, obfuscate_phone,
-    clear_content
+    clear_content, obfuscate_family_name
 )
 
 # --- Textual TUI App ---
@@ -1903,34 +1903,70 @@ def apply_anonymization(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
     logger.debug(f"DEBUG: Applying rules for {table_name} (found config key: {table_key})")
     rules = SENSITIVE_COLUMNS[table_key]
     for col, (func_name, seed_col) in rules.items():
-        if col in df.columns:
-            logger.debug(f"  -> Processing column: {col} with {func_name} (seed: {seed_col})")
-            # Get the function from global scope
-            func = globals()[func_name]
-            
-            # Apply row by row (performance impact but necessary for dependencies like emp_no)
-            # Optimization: Vectorize if possible, but custom logic usually needs apply
-            if seed_col:
-                if seed_col not in df.columns:
-                    logger.warning(f"  ⚠️ Warning: Seed column '{seed_col}' not found in {table_name}. Skipping...")
-                    continue
-                
-                # Debug sample before
-                if not df.empty:
-                    sample_row = df.iloc[0]
-                    logger.debug(f"  DEBUG: Sample Before - {col}: '{sample_row[col]}', {seed_col}: '{sample_row[seed_col]}'")
-
-                # Salted Seed Logic
-                df[col] = df.apply(lambda row: func(row[col], f"{row[seed_col]}_{DATE_SALT}"), axis=1)
-
-                # Debug sample after
-                if not df.empty:
-                    logger.debug(f"  DEBUG: Sample After  - {col}: '{df.iloc[0][col]}'")
-            else:
-                df[col] = df[col].apply(lambda x: func(x))
-        else:
+        if col not in df.columns:
             logger.debug(f"  DEBUG: Column {col} not found in dataframe columns: {df.columns.tolist()}")
-                
+            continue
+
+        logger.debug(f"  -> Processing column: {col} with {func_name} (seed: {seed_col})")
+        func = globals()[func_name]
+
+        # Multi-column seed spec (colon-delimited): "emp_col:rel_col:sort_col"
+        # Used by obfuscate_family_name to build composite seed with stable member_index.
+        if seed_col and ':' in seed_col:
+            parts = seed_col.split(':')
+            emp_col  = parts[0]
+            rel_col  = parts[1]
+            sort_col = parts[2] if len(parts) > 2 else None
+
+            missing = [c for c in [emp_col, rel_col] if c not in df.columns]
+            if missing:
+                logger.warning(f"  ⚠️ Composite seed columns not found for {col}: {missing}. Skipping...")
+                continue
+
+            # Sort by sort_col within (emp_col, rel_col) groups so that member_index
+            # is stable regardless of the original row order in this chunk.
+            if sort_col and sort_col in df.columns:
+                sorted_df = df.sort_values([emp_col, rel_col, sort_col])
+            else:
+                sorted_df = df.sort_values([emp_col, rel_col])
+
+            # cumcount assigns 0,1,2... per (emp_col, rel_col) group in sorted order.
+            # sort_values preserves the original index, so reindex aligns back to df.
+            member_idx = sorted_df.groupby([emp_col, rel_col]).cumcount()
+
+            df['__composite_seed__'] = (
+                df[emp_col].astype(str) + '|' +
+                df[rel_col].astype(str) + '|' +
+                member_idx.reindex(df.index).astype(str)
+            )
+
+            if not df.empty:
+                logger.debug(f"  DEBUG: Sample composite_seed: '{df['__composite_seed__'].iloc[0]}'")
+
+            df[col] = df.apply(lambda row: func(row[col], row['__composite_seed__']), axis=1)
+            df.drop(columns=['__composite_seed__'], inplace=True)
+
+            if not df.empty:
+                logger.debug(f"  DEBUG: Sample After - {col}: '{df[col].iloc[0]}'")
+            continue
+
+        # Original single-column seed logic
+        if seed_col:
+            if seed_col not in df.columns:
+                logger.warning(f"  ⚠️ Warning: Seed column '{seed_col}' not found in {table_name}. Skipping...")
+                continue
+
+            if not df.empty:
+                sample_row = df.iloc[0]
+                logger.debug(f"  DEBUG: Sample Before - {col}: '{sample_row[col]}', {seed_col}: '{sample_row[seed_col]}'")
+
+            df[col] = df.apply(lambda row: func(row[col], f"{row[seed_col]}_{DATE_SALT}"), axis=1)
+
+            if not df.empty:
+                logger.debug(f"  DEBUG: Sample After  - {col}: '{df.iloc[0][col]}'")
+        else:
+            df[col] = df[col].apply(lambda x: func(x))
+
     return df
 
 def run_replication(args=None):
