@@ -2064,88 +2064,89 @@ def run_replication(args=None):
             logger.info("未選擇任何物件，程式結束。")
             return
 
-        break  # Exit loop → proceed to clone
-    # Reload Config just in case user changed it in TableSelector
-    _, filters, pii_rules, _ = config_mgr.get_project_config(project_id)
-    SENSITIVE_COLUMNS = pii_rules
-    LARGE_TABLE_FILTERS = filters
+        # Reload Config just in case user changed it in TableSelector
+        _, filters, pii_rules, _ = config_mgr.get_project_config(project_id)
+        SENSITIVE_COLUMNS = pii_rules
+        LARGE_TABLE_FILTERS = filters
 
-    selected_tables = list(payload.get("tables", []))
-    selected_views = list(payload.get("views", []))
-    selected_funcs = list(payload.get("functions", []))
-    selected_sps = list(payload.get("sps", []))
-    selected_triggers = list(payload.get("triggers", []))
+        selected_tables = list(payload.get("tables", []))
+        selected_views = list(payload.get("views", []))
+        selected_funcs = list(payload.get("functions", []))
+        selected_sps = list(payload.get("sps", []))
+        selected_triggers = list(payload.get("triggers", []))
     
-    logger.info(f"\n準備開始複製...\n")
+        logger.info(f"\n準備開始複製...\n")
     
-    # 4. 處理複製
-    for table in selected_tables:
-        logger.info(f"處理資料表: {table}")
+        # 4. 處理複製
+        for table in selected_tables:
+            logger.info(f"處理資料表: {table}")
         
-        # 檢查是否有篩選條件
-        where_clause = LARGE_TABLE_FILTERS.get(table)
-        if where_clause:
-            import re
-            logger.info(f"  -> 套用篩選條件: {where_clause}")
-            query = f"SELECT * FROM {table} WHERE {where_clause}"
-            # 移除 ORDER BY 以避免 COUNT 查詢錯誤
-            count_where = re.split(r'\s+ORDER\s+BY\s+', where_clause, flags=re.IGNORECASE)[0]
-            count_query = f"SELECT COUNT(*) FROM {table} WHERE {count_where}"
-        else:
-            query = f"SELECT * FROM {table}"
-            count_query = f"SELECT COUNT(*) FROM {table}"
-            
-        try:
-            if source_engine and target_engine:
-                # 真實執行
-                with source_engine.connect() as conn:
-                    total_count = conn.execute(text(count_query)).scalar()
-
-                chunk_size = 5000
-                with tqdm(total=total_count, desc=f"Copying {table}", unit="rows") as pbar:
-                    for chunk in pd.read_sql(query, source_engine, chunksize=chunk_size):
-                        # 套用去識別化
-                        chunk = apply_anonymization(chunk, table)
-                        
-                        # Fix encoding issues for Chinese characters
-                        dtype_map = {c: NVARCHAR for c in chunk.select_dtypes(include=['object', 'str']).columns}
-
-                        # 寫入目標資料庫
-                        chunk.to_sql(table, target_engine, if_exists='append', index=False, dtype=dtype_map)
-                        pbar.update(len(chunk))
+            # 檢查是否有篩選條件
+            where_clause = LARGE_TABLE_FILTERS.get(table)
+            if where_clause:
+                import re
+                logger.info(f"  -> 套用篩選條件: {where_clause}")
+                query = f"SELECT * FROM {table} WHERE {where_clause}"
+                # 移除 ORDER BY 以避免 COUNT 查詢錯誤
+                count_where = re.split(r'\s+ORDER\s+BY\s+', where_clause, flags=re.IGNORECASE)[0]
+                count_query = f"SELECT COUNT(*) FROM {table} WHERE {count_where}"
             else:
-                # 模擬執行
-                total_rows = 15000 
-                chunk_size = 5000
-                with tqdm(total=total_rows, desc=f"Copying {table} (Mock)", unit="rows") as pbar:
-                    for _ in range(0, total_rows, chunk_size):
-                        time.sleep(0.1) 
-                        pbar.update(chunk_size)
+                query = f"SELECT * FROM {table}"
+                count_query = f"SELECT COUNT(*) FROM {table}"
+            
+            try:
+                if source_engine and target_engine:
+                    # 真實執行
+                    with source_engine.connect() as conn:
+                        total_count = conn.execute(text(count_query)).scalar()
 
-        except Exception as e:
-            logger.error(f"❌ 處理 {table} 時發生錯誤: {e}")
-            continue
+                    chunk_size = 5000
+                    with tqdm(total=total_count, desc=f"Copying {table}", unit="rows") as pbar:
+                        for chunk in pd.read_sql(query, source_engine, chunksize=chunk_size):
+                            # 套用去識別化
+                            chunk = apply_anonymization(chunk, table)
+                        
+                            # Fix encoding issues for Chinese characters
+                            dtype_map = {c: NVARCHAR for c in chunk.select_dtypes(include=['object', 'str']).columns}
 
-    if source_engine and target_engine:
-        # Phase 2: Views
-        if selected_views:
-            clone_views(selected_views, source_engine, target_engine, src_db, tgt_db)
+                            # 寫入目標資料庫
+                            chunk.to_sql(table, target_engine, if_exists='append', index=False, dtype=dtype_map)
+                            pbar.update(len(chunk))
+                else:
+                    # 模擬執行
+                    total_rows = 15000 
+                    chunk_size = 5000
+                    with tqdm(total=total_rows, desc=f"Copying {table} (Mock)", unit="rows") as pbar:
+                        for _ in range(0, total_rows, chunk_size):
+                            time.sleep(0.1) 
+                            pbar.update(chunk_size)
 
-        # Phase 3: Functions (before SPs)
-        if selected_funcs:
-            clone_sps_and_functions(selected_funcs, source_engine, target_engine, src_db, tgt_db, is_func=True)
+            except Exception as e:
+                logger.error(f"❌ 處理 {table} 時發生錯誤: {e}")
+                continue
 
-        # Phase 3: SPs
-        if selected_sps:
-            clone_sps_and_functions(selected_sps, source_engine, target_engine, src_db, tgt_db, is_func=False)
+        if source_engine and target_engine:
+            # Phase 2: Views
+            if selected_views:
+                clone_views(selected_views, source_engine, target_engine, src_db, tgt_db)
 
-        # Phase 4: Triggers
-        if selected_triggers:
-            clone_triggers(selected_triggers, source_engine, target_engine, src_db, tgt_db)
-    else:
-        logger.info("Demo 模式：略過 View / SP / Function / Trigger 的實際複製")
+            # Phase 3: Functions (before SPs)
+            if selected_funcs:
+                clone_sps_and_functions(selected_funcs, source_engine, target_engine, src_db, tgt_db, is_func=True)
+
+            # Phase 3: SPs
+            if selected_sps:
+                clone_sps_and_functions(selected_sps, source_engine, target_engine, src_db, tgt_db, is_func=False)
+
+            # Phase 4: Triggers
+            if selected_triggers:
+                clone_triggers(selected_triggers, source_engine, target_engine, src_db, tgt_db)
+        else:
+            logger.info("Demo 模式：略過 View / SP / Function / Trigger 的實際複製")
     
-    logger.info("\n所有作業完成！")
+        logger.info("\n所有作業完成！")
+
+        input("\n請按 Enter 鍵返回首頁...")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="HRM Database Replicator")
