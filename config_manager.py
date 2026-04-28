@@ -211,15 +211,14 @@ class ConfigManager:
                 if not project:
                     raise ValueError(f"Project ID {project_id} not found")
 
-                # Map existing ProjectTables
-                existing_tables = {pt.table_name: pt for pt in project.tables}
+                # Map existing ProjectTables (ONLY of type TABLE)
+                existing_tables = {pt.table_name: pt for pt in project.tables if pt.object_type == "TABLE"}
                 
                 # Consolidate all relevant tables (selected, or has filter, or has PII)
                 all_involved_tables = set(selected_tables) | set(filters.keys()) | set(sensitive_columns.keys())
                 
                 # We need to process existing tables to update them, and create new ones
-                # Ideally, we should also handle "unselecting" tables. 
-                # Simplest approach: Update/Create for involved tables, Mark others as not selected.
+                # Update/Create for involved tables, Mark others as not selected.
                 
                 timestamp = datetime.now()
                 project.updated_at = timestamp
@@ -227,7 +226,7 @@ class ConfigManager:
                 for table_name in all_involved_tables:
                     pt = existing_tables.get(table_name)
                     if not pt:
-                        pt = ProjectTable(project_id=project_id, table_name=table_name)
+                        pt = ProjectTable(project_id=project_id, table_name=table_name, object_type="TABLE")
                         session.add(pt)
                     
                     # Update selection
@@ -237,8 +236,6 @@ class ConfigManager:
                     pt.filter_clause = filters.get(table_name)
                     
                     # Update Sensitive Columns
-                    # First clear existing (lazy way, or check diff)
-                    # For simplicity in this tool: clear and re-add for this table
                     if pt.id: # If it's an existing record
                         session.query(SensitiveColumn).filter_by(project_table_id=pt.id).delete()
                     
@@ -254,8 +251,6 @@ class ConfigManager:
                         session.add(sc)
                 
                 # For tables that existed but are no longer in "all_involved_tables"
-                # (e.g. unselected and filters removed)
-                # We can either delete them or just set is_selected=False
                 for table_name, pt in existing_tables.items():
                     if table_name not in all_involved_tables:
                         pt.is_selected = False
@@ -596,4 +591,67 @@ class ConfigManager:
             existing_pii
         )
         logger.info(f"Imported config into project {project_id}")
+
+    def export_deploy_profile(self, project_id: int, output_path: str) -> str:
+        """
+        從 config.db 快照匯出完整 Deploy Profile JSON。
+        回傳實際寫出的絕對路徑。
+        """
+        with self.get_session() as session:
+            project = session.get(Project, project_id)
+            if not project:
+                raise ValueError(f"Project ID {project_id} not found")
+
+            # Initialize objects structure
+            profile = {
+                "profile_version": "1.0",
+                "project_name": project.name,
+                "created_at": datetime.now().isoformat(),
+                "objects": {
+                    "tables": [],
+                    "views": [],
+                    "sps": [],
+                    "functions": [],
+                    "triggers": []
+                },
+                "filters": {},
+                "pii_rules": {}
+            }
+
+            # Map DB object types to JSON schema keys
+            type_map = {
+                "TABLE": "tables",
+                "VIEW": "views",
+                "SP": "sps",
+                "FUNCTION": "functions",
+                "TRIGGER": "triggers"
+            }
+
+            for pt in project.tables:
+                if pt.is_selected:
+                    json_key = type_map.get(pt.object_type)
+                    if json_key:
+                        profile["objects"][json_key].append(pt.table_name)
+                    
+                    if pt.object_type == "TABLE":
+                        if pt.filter_clause:
+                            profile["filters"][pt.table_name] = pt.filter_clause
+                        
+                        rules = {}
+                        for sc in pt.sensitive_columns:
+                            rules[sc.column_name] = [sc.function_name, sc.seed_column]
+                        if rules:
+                            profile["pii_rules"][pt.table_name] = rules
+
+            # Ensure directory exists
+            output_dir = os.path.dirname(output_path)
+            if output_dir and not os.path.exists(output_dir):
+                os.makedirs(output_dir, exist_ok=True)
+
+            with open(output_path, 'w', encoding='utf-8') as f:
+                json.dump(profile, f, ensure_ascii=False, indent=2)
+
+            abs_path = os.path.abspath(output_path)
+            logger.info(f"Exported Deploy Profile for project '{project.name}' to: {abs_path}")
+            return abs_path
 
