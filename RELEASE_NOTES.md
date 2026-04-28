@@ -1,3 +1,42 @@
+# 版本發佈 v1.3.0 (Pre) — 2026-04-28
+
+## 實作 DDL Deploy Profile：支援 CLI 無人值守部署與設定匯出
+**feat: DDL Deploy Profile, Headless Batch Deployment and TUI Export Workflow**
+
+---
+
+### 1. DDL Deploy Profile (設定檔匯出)
+- **標準化 Schema**：實作 JSON v1.0 規範，完整封裝資料表、檢視表、預存程序等物件選取，以及對應的篩選條件與 PII 規則。
+- **TUI 匯出工作流**：在物件選擇畫面新增 `X` 快捷鍵，支援：
+    - **差異偵測**：自動比對記憶體與資料庫狀態，顯示「設定已更新」或「設定無差異」提示。
+    - **路徑自定義**：彈出式視窗可自由調整匯出檔名。
+    - **安全警告**：若設定檔包含 Trigger，匯出時會自動提示潛在風險。
+
+### 2. 無人值守部署 (Headless Mode)
+- **CLI 整合**：新增 `--deploy-profile <PATH>` 參數，可跳過 TUI 直接進入複製流程。
+- **嚴謹驗證**：Headless 模式下強制執行 PII 函數白名單檢查與連線參數完整性驗證，確保自動化腳本執行安全。
+- **靈活連線**：支援從 CLI 參數或環境變數 (`SRC_DB_PWD` 等) 讀取敏感連線資訊，方便整合 CI/CD。
+- **姓名資料自動關聯**：Headless 模式會自動嘗試從 `config.db` 找尋同名專案以套用對應的姓名來源設定。
+
+### 3. ConfigManager 與核心重構
+- **狀態隔離**：修正 `save_project_state` 邏輯，確保儲存 Table 設定時不會誤觸其他物件 (View/SP) 的選取狀態。
+- **邏輯抽離**：將核心複製引擎重構為 `_execute_replication` 獨立函數，達成 TUI 與 Headless 程式碼高度共用。
+- **白名單驗證**：新增 `VALID_ANON_FUNCTIONS` 常數，強化去敏化流程的安全性。
+
+### 無人值守模式 (Headless Mode)
+使用預先導出的 Deploy Profile 執行自動化部署：
+```bash
+python db_replicator.py --deploy-profile my_project_profile.json \
+  --src-pwd "source_password" --tgt-pwd "target_password"
+```
+或者使用環境變數：
+```bash
+export SRC_DB_PWD="your_password"
+python db_replicator.py --deploy-profile my_project_profile.json
+```
+
+---
+
 # 版本發佈 v1.2.0 (Release v1.2.0) — 2026-03-20
 
 ## 完成了一系列 TUI 介面優化、功能增強以及主題化工程
@@ -68,7 +107,8 @@ sqlite3 config.db "ALTER TABLE project_tables ADD COLUMN object_type VARCHAR DEF
 4. **說明頁面 (Info Screen)**
    - 新增 `Info.txt` 版本說明文件
    - 按 `?` 開啟捲動式說明頁面，含版本資訊、快捷鍵列表、更新紀錄
-   - 按 `Q` 或 `ESC` 關閉
+   - `Space` 選取 / `A` 全選 / `F` 篩選條件 / `P` PII 規則
+   - `Ctrl+O` 返回專案 / `S` 儲存 / `X` 匯出設定檔 / `G` 開始複製 / `Q` 離開
 
 5. **離開功能 (Exit)**
    - 專案選擇畫面按 `X` 可直接離開程式
