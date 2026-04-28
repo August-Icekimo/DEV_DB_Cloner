@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from typing import List, Dict, Optional, Tuple
 
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, UniqueConstraint, func
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, DateTime, ForeignKey, UniqueConstraint, func, text
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship, Session
 
 # Setup Logging
