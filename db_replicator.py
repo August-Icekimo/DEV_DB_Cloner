@@ -1772,17 +1772,17 @@ def fetch_all_views(engine) -> List[str]:
 def fetch_all_sps(engine) -> List[str]:
     query = "SELECT name FROM sys.objects WHERE type = 'P' AND is_ms_shipped = 0 ORDER BY name"
     with engine.connect() as conn:
-        return [row[0] for row in conn.execute(text(query))]
+        return [row[0] for row in conn.exec_driver_sql(query)]
 
 def fetch_all_functions(engine) -> List[str]:
     query = "SELECT name FROM sys.objects WHERE type IN ('FN', 'IF', 'TF') AND is_ms_shipped = 0 ORDER BY name"
     with engine.connect() as conn:
-        return [row[0] for row in conn.execute(text(query))]
+        return [row[0] for row in conn.exec_driver_sql(query)]
 
 def fetch_all_triggers(engine) -> List[str]:
     query = "SELECT name FROM sys.triggers WHERE is_ms_shipped = 0 ORDER BY name"
     with engine.connect() as conn:
-        return [row[0] for row in conn.execute(text(query))]
+        return [row[0] for row in conn.exec_driver_sql(query)]
 
 def fetch_ddl(engine, object_name: str, object_type: str) -> str:
     """
@@ -1792,12 +1792,12 @@ def fetch_ddl(engine, object_name: str, object_type: str) -> str:
     """
     query = f"SELECT OBJECT_DEFINITION(OBJECT_ID('{object_name}'))"
     with engine.connect() as conn:
-        result = conn.execute(text(query)).scalar()
+        result = conn.exec_driver_sql(query).scalar()
         if not result:
             return ""
         if object_type == "TRIGGER":
             parent_q = f"SELECT OBJECT_NAME(parent_id) FROM sys.triggers WHERE object_id = OBJECT_ID('{object_name}')"
-            parent = conn.execute(text(parent_q)).scalar()
+            parent = conn.exec_driver_sql(parent_q).scalar()
             return f"-- TRIGGER FOR TABLE: {parent}\n{result}"
         return result
 
@@ -1813,20 +1813,35 @@ def fetch_dependencies(engine, object_name: str) -> List[Dict[str, str]]:
     """
     with engine.connect() as conn:
         deps = []
-        for row in conn.execute(text(query)):
+        for row in conn.exec_driver_sql(query):
             deps.append({"name": row[0], "type": row[1] or "UNKNOWN"})
         return deps
 
 def preprocess_ddl(ddl: str, src_db: str, tgt_db: str) -> str:
     """
-    用 regex 替換三段式名稱中的來源 DB 名稱為目標 DB 名稱
-    例：[hrm].[dbo].[vw_Emp] → [hrm_dev].[dbo].[vw_Emp]
+    1. 用 regex 替換三段式名稱中的來源 DB 名稱為目標 DB 名稱
+    2. 修正常見的 SQL Server 語法相容性問題 (如 float % int)
     """
     import re
     if not ddl:
         return ""
+    
+    # 替換 DB 名稱
     pattern = re.compile(re.escape(f"[{src_db}]"), re.IGNORECASE)
-    return pattern.sub(f"[{tgt_db}]", ddl)
+    ddl = pattern.sub(f"[{tgt_db}]", ddl)
+    
+    # 修正 "The data types float and int are incompatible in the modulo operator"
+    # 將 sum(...) % N 或 isNull(sum(...), 0) % N 轉換為 CAST(... AS INT) % N
+    # 這樣可以避免 float 型態直接進入 modulo 運算
+    # Regex 說明：抓取 sum(...) 或是 isNull(sum(...), 0) 並且後面接 % 數字
+    ddl = re.sub(
+        r"((?:isNull\(\s*)?sum\([^)]+\)(?:\s*,\s*0\s*\))?)(\s*%\s*\d+)", 
+        r"CAST(\1 AS INT)\2", 
+        ddl, 
+        flags=re.IGNORECASE
+    )
+    
+    return ddl
 
 def topological_sort(objects: List[str], engine) -> List[str]:
     """
@@ -1874,9 +1889,9 @@ def clone_views(selected_views: List[str], src_engine, tgt_engine, src_db: str, 
             ddl = preprocess_ddl(ddl, src_db, tgt_db)
             drop_stmt = f"IF OBJECT_ID('{view}', 'V') IS NOT NULL DROP VIEW {view};"
             with tgt_engine.connect() as conn:
-                conn.execute(text(drop_stmt))
+                conn.exec_driver_sql(drop_stmt)
                 if ddl.strip():
-                    conn.execute(text(ddl))
+                    conn.exec_driver_sql(ddl)
                 conn.commit()
             logger.info(f"✅ View {view} 複製成功")
         except Exception as e:
@@ -1895,9 +1910,9 @@ def clone_sps_and_functions(selected: List[str], src_engine, tgt_engine, src_db:
             drop_type = "FUNCTION" if is_func else "PROCEDURE"
             drop_stmt = f"IF OBJECT_ID('{obj}') IS NOT NULL AND OBJECTPROPERTY(OBJECT_ID('{obj}'), 'IsMSShipped') = 0 DROP {drop_type} {obj};"
             with tgt_engine.connect() as conn:
-                conn.execute(text(drop_stmt))
+                conn.exec_driver_sql(drop_stmt)
                 if ddl.strip():
-                    conn.execute(text(ddl))
+                    conn.exec_driver_sql(ddl)
                 conn.commit()
             logger.info(f"✅ {obj_type_str} {obj} 複製成功")
         except Exception as e:
@@ -1912,9 +1927,9 @@ def clone_triggers(selected_triggers: List[str], src_engine, tgt_engine, src_db:
             ddl = preprocess_ddl(ddl, src_db, tgt_db)
             drop_stmt = f"IF OBJECT_ID('{obj}', 'TR') IS NOT NULL DROP TRIGGER {obj};"
             with tgt_engine.connect() as conn:
-                conn.execute(text(drop_stmt))
+                conn.exec_driver_sql(drop_stmt)
                 if ddl.strip():
-                    conn.execute(text(ddl))
+                    conn.exec_driver_sql(ddl)
                 conn.commit()
             logger.info(f"✅ Trigger {obj} 複製成功")
         except Exception as e:
@@ -2155,7 +2170,7 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
             if source_engine and target_engine:
                 # 真實執行
                 with source_engine.connect() as conn:
-                    total_count = conn.execute(text(count_query)).scalar()
+                    total_count = conn.exec_driver_sql(count_query).scalar()
 
                 chunk_size = 5000
                 with tqdm(total=total_count, desc=f"Copying {table}", unit="rows") as pbar:
