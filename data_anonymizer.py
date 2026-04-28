@@ -5,6 +5,17 @@ import os
 from datetime import datetime
 from sqlalchemy import text
 
+# Valid anonymization functions for validation
+VALID_ANON_FUNCTIONS = {
+    "obfuscate_name",
+    "obfuscate_spouse_name",
+    "anonymize_id",
+    "obfuscate_address",
+    "obfuscate_phone",
+    "clear_content",
+    "obfuscate_family_name"
+}
+
 # 主要設定
 OBFUSCATE_NAME_FILE = 'OBFUSCATE_NAME.json'
 
