@@ -598,27 +598,13 @@ class ConnectionScreen(ModalScreen):
     def _toggle_password(self, side: str) -> None:
         """Toggle display of password field for 'src' or 'tgt'."""
         field_id = f"{side}-pwd"
-        row_id   = f"{side}-pwd-row"
         is_masked_attr = f"_{side}_pwd_masked"
 
         current_input = self.query_one(f"#{field_id}", Input)
-        current_value = current_input.value
-        currently_masked = getattr(self, is_masked_attr)
-        new_masked = not currently_masked
+        new_masked = not getattr(self, is_masked_attr)
         setattr(self, is_masked_attr, new_masked)
-
-        row = self.query_one(f"#{row_id}")
-        new_input = Input(
-            value=current_value,
-            placeholder="密碼",
-            password=new_masked,
-            id=field_id,
-            classes="field-input",
-        )
-        current_input.remove()
-        eye_btn = self.query_one(f"#btn-eye-{side}", Button)
-        row.mount(new_input, before=eye_btn)
-        new_input.focus()
+        current_input.password = new_masked
+        current_input.focus()
 
     # ------------------------------------------------------------------
     # Button handler
