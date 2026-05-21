@@ -1585,46 +1585,46 @@ class TableSelector(App):
         self.notify(f"{'已全選' if self.all_selected else '已取消全選'}")
 
     def action_edit_filter(self) -> None:
-        if not self.current_table:
+        if not self.current_object:
             self.notify("請先選擇資料表", severity="warning")
             return
-        
-        current_filter = self.filters.get(self.current_table, "")
-        
+
+        current_filter = self.filters.get(self.current_object, "")
+
         def on_filter_result(result: Optional[str]) -> None:
             if result is not None:
                 if result:
-                    self.filters[self.current_table] = result
-                    self.notify(f"✅ 已更新 {self.current_table} 的篩選條件")
+                    self.filters[self.current_object] = result
+                    self.notify(f"✅ 已更新 {self.current_object} 的篩選條件")
                 else:
-                    if self.current_table in self.filters:
-                        del self.filters[self.current_table]
-                        self.notify(f"🗑️ 已移除 {self.current_table} 的篩選條件")
+                    if self.current_object in self.filters:
+                        del self.filters[self.current_object]
+                        self.notify(f"🗑️ 已移除 {self.current_object} 的篩選條件")
                 self.configs_modified = True
                 self._update_side_panels()
-        
-        self.push_screen(FilterEditorScreen(self.current_table, current_filter), on_filter_result)
+
+        self.push_screen(FilterEditorScreen(self.current_object, current_filter), on_filter_result)
 
     def action_edit_pii(self) -> None:
-        if not self.current_table:
+        if not self.current_object:
             self.notify("請先選擇資料表", severity="warning")
             return
-        
-        current_rules = self.pii_rules.get(self.current_table, {})
-        
+
+        current_rules = self.pii_rules.get(self.current_object, {})
+
         def on_pii_result(result: Optional[dict]) -> None:
             if result is not None:
                 if result:
-                    self.pii_rules[self.current_table] = result
-                    self.notify(f"✅ 已更新 {self.current_table} 的 PII 規則")
+                    self.pii_rules[self.current_object] = result
+                    self.notify(f"✅ 已更新 {self.current_object} 的 PII 規則")
                 else:
-                    if self.current_table in self.pii_rules:
-                        del self.pii_rules[self.current_table]
-                        self.notify(f"🗑️ 已移除 {self.current_table} 的 PII 規則")
+                    if self.current_object in self.pii_rules:
+                        del self.pii_rules[self.current_object]
+                        self.notify(f"🗑️ 已移除 {self.current_object} 的 PII 規則")
                 self.configs_modified = True
                 self._update_side_panels()
-        
-        self.push_screen(PIIEditorScreen(self.current_table, current_rules), on_pii_result)
+
+        self.push_screen(PIIEditorScreen(self.current_object, current_rules), on_pii_result)
 
     def action_back_to_project(self) -> None:
         """Go back to Project Selector (Ctrl+O)"""
@@ -1640,23 +1640,25 @@ class TableSelector(App):
         
         self.push_screen(ProjectSettingsScreen(self.project_id), on_settings_changed)
 
-    def action_save_configs(self) -> None:
-        """Save to SQLite"""
+    def action_save_configs(self) -> bool:
+        """Save to SQLite. Returns True on success."""
         try:
             list_view = self.query_one("#table-list", ListView)
             selected = [
-                item.table_name for item in list_view.children 
+                item.table_name for item in list_view.children
                 if isinstance(item, TableItem) and item.checked
             ]
-            
+
             config_mgr.save_project_state_by_type(self.project_id, self.current_tab, selected)
             if self.current_tab == "TABLE":
                 config_mgr.save_project_state(self.project_id, selected, self.filters, self.pii_rules)
-            
+
             self.configs_modified = False
             self.notify(f"✅ {self.current_tab} 設定已儲存 (DB)")
+            return True
         except Exception as e:
             self.notify(f"❌ 儲存失敗: {e}", severity="error")
+            return False
 
     def action_export_profile(self) -> None:
         """Export Deploy Profile JSON (Hotkey X)"""
@@ -1718,8 +1720,10 @@ class TableSelector(App):
             self.notify(f"❌ 匯出流程錯誤: {e}", severity="error")
 
     def action_initiate_confirm(self) -> None:
-        self.action_save_configs()
-        
+        if not self.action_save_configs():
+            self.notify("❌ 儲存失敗，無法繼續。請確認 DB 狀態後重試。", severity="error")
+            return
+
         payload = {}
         for t in ["TABLE", "VIEW", "SP", "FUNCTION", "TRIGGER"]:
             sel, _, _ = config_mgr.get_project_config_by_type(self.project_id, t)
