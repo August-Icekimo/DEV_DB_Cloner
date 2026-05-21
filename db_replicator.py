@@ -1,4 +1,5 @@
 import sys
+import re
 import importlib
 import time
 from datetime import datetime
@@ -1690,8 +1691,10 @@ class TableSelector(App):
             is_different = set(current_selected) != set(db_selected)
             
             # 3. 強制執行存檔 (更新 DB)
-            self.action_save_configs()
-            
+            if not self.action_save_configs():
+                self.notify("❌ 儲存失敗，無法匯出。請確認 DB 狀態後重試。", severity="error")
+                return
+
             # 4. 顯示對應的快閃訊息
             if is_different:
                 self.notify("💾 設定已更新並儲存")
@@ -1780,6 +1783,11 @@ def create_target_table_from_source(src_engine, tgt_engine, table_name: str) -> 
     IDENTITY constraints are intentionally omitted so we can INSERT source values directly.
     Returns True on success, False on failure.
     """
+    # Escape for SQL string literals (OBJECT_ID / IF OBJECT_ID): ' → ''
+    safe_str  = table_name.replace("'", "''")
+    # Escape for bracket-quoted identifiers (DROP/CREATE TABLE): ] → ]]
+    safe_id   = table_name.replace("]", "]]")
+
     query = f"""
         SELECT
             c.name,
@@ -1800,7 +1808,7 @@ def create_target_table_from_source(src_engine, tgt_engine, table_name: str) -> 
             c.is_nullable
         FROM sys.columns c
         JOIN sys.types tp ON c.user_type_id = tp.user_type_id
-        WHERE c.object_id = OBJECT_ID('{table_name}')
+        WHERE c.object_id = OBJECT_ID('{safe_str}')
         ORDER BY c.column_id
     """
     try:
@@ -1814,10 +1822,11 @@ def create_target_table_from_source(src_engine, tgt_engine, table_name: str) -> 
         for col_name, type_name, type_params, is_nullable in rows:
             col_type = f"{type_name}({type_params})" if type_params else type_name
             null_clause = "NULL" if is_nullable else "NOT NULL"
-            col_defs.append(f"    [{col_name}] {col_type} {null_clause}")
+            safe_col = col_name.replace("]", "]]")
+            col_defs.append(f"    [{safe_col}] {col_type} {null_clause}")
 
-        create_ddl = f"CREATE TABLE [{table_name}] (\n" + ",\n".join(col_defs) + "\n)"
-        drop_ddl   = f"IF OBJECT_ID('{table_name}', 'U') IS NOT NULL DROP TABLE [{table_name}]"
+        create_ddl = f"CREATE TABLE [{safe_id}] (\n" + ",\n".join(col_defs) + "\n)"
+        drop_ddl   = f"IF OBJECT_ID('{safe_str}', 'U') IS NOT NULL DROP TABLE [{safe_id}]"
 
         try:
             with tgt_engine.begin() as conn:
@@ -1880,7 +1889,6 @@ def preprocess_ddl(ddl: str, src_db: str, tgt_db: str) -> str:
     1. 用 regex 替換三段式名稱中的來源 DB 名稱為目標 DB 名稱
     2. 修正常見的 SQL Server 語法相容性問題 (如 float % int)
     """
-    import re
     if not ddl:
         return ""
     
@@ -2214,7 +2222,6 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
         # 檢查是否有篩選條件
         where_clause = LARGE_TABLE_FILTERS.get(table)
         if where_clause:
-            import re
             logger.info(f"  -> 套用篩選條件: {where_clause}")
             query = f"SELECT * FROM {table} WHERE {where_clause}"
             # 移除 ORDER BY 以避免 COUNT 查詢錯誤
@@ -2269,15 +2276,15 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
         if selected_views:
             clone_views(selected_views, source_engine, target_engine, src_db, tgt_db)
 
-        # Phase 3: Functions (before SPs)
+        # Phase 3: Functions (before SPs to satisfy dependencies)
         if selected_funcs:
             clone_sps_and_functions(selected_funcs, source_engine, target_engine, src_db, tgt_db, is_func=True)
 
-        # Phase 3: SPs
+        # Phase 4: SPs
         if selected_sps:
             clone_sps_and_functions(selected_sps, source_engine, target_engine, src_db, tgt_db, is_func=False)
 
-        # Phase 4: Triggers
+        # Phase 5: Triggers
         if selected_triggers:
             clone_triggers(selected_triggers, source_engine, target_engine, src_db, tgt_db)
     else:
@@ -2326,9 +2333,12 @@ def profile_to_payload(profile: dict) -> dict:
         "triggers": objects.get("triggers", []),
     }
     
+    # Intentional side-effect: populate module-level globals so _execute_replication
+    # (which reads these globals) picks up the profile's filters and PII rules without
+    # needing to pass them through every call site.
     LARGE_TABLE_FILTERS = profile.get("filters", {})
     SENSITIVE_COLUMNS = profile.get("pii_rules", {})
-    
+
     return payload
 
 

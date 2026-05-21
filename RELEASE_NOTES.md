@@ -107,8 +107,7 @@ sqlite3 config.db "ALTER TABLE project_tables ADD COLUMN object_type VARCHAR DEF
 4. **說明頁面 (Info Screen)**
    - 新增 `Info.txt` 版本說明文件
    - 按 `?` 開啟捲動式說明頁面，含版本資訊、快捷鍵列表、更新紀錄
-   - `Space` 選取 / `A` 全選 / `F` 篩選條件 / `P` PII 規則
-   - `Ctrl+O` 返回專案 / `S` 儲存 / `X` 匯出設定檔 / `G` 開始複製 / `Q` 離開
+   - 按 `Q` 或 `ESC` 關閉
 
 5. **離開功能 (Exit)**
    - 專案選擇畫面按 `X` 可直接離開程式
