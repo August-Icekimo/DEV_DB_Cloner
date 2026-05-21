@@ -1770,6 +1770,74 @@ def fetch_all_triggers(engine) -> List[str]:
     with engine.connect() as conn:
         return [row[0] for row in conn.exec_driver_sql(query)]
 
+def create_target_table_from_source(src_engine, tgt_engine, table_name: str) -> bool:
+    """
+    Query sys.columns on source and CREATE the table on target with correct types.
+    IDENTITY constraints are intentionally omitted so we can INSERT source values directly.
+    Returns True on success, False on failure.
+    """
+    query = f"""
+        SELECT
+            c.name,
+            tp.name AS type_name,
+            CASE
+                WHEN tp.name IN ('varchar','char','varbinary','binary')
+                    THEN CASE WHEN c.max_length = -1 THEN 'MAX'
+                              ELSE CAST(c.max_length AS VARCHAR) END
+                WHEN tp.name IN ('nvarchar','nchar')
+                    THEN CASE WHEN c.max_length = -1 THEN 'MAX'
+                              ELSE CAST(c.max_length / 2 AS VARCHAR) END
+                WHEN tp.name IN ('decimal','numeric')
+                    THEN CAST(c.precision AS VARCHAR) + ',' + CAST(c.scale AS VARCHAR)
+                WHEN tp.name IN ('datetime2','datetimeoffset','time')
+                    THEN CAST(c.scale AS VARCHAR)
+                ELSE NULL
+            END AS type_params,
+            c.is_nullable
+        FROM sys.columns c
+        JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+        WHERE c.object_id = OBJECT_ID('{table_name}')
+        ORDER BY c.column_id
+    """
+    try:
+        with src_engine.connect() as conn:
+            rows = conn.exec_driver_sql(query).fetchall()
+        if not rows:
+            logger.warning(f"  ⚠️ 無法從 source 取得 {table_name} 的欄位資訊，將由 pandas 自動建立結構")
+            return False
+
+        col_defs = []
+        for col_name, type_name, type_params, is_nullable in rows:
+            col_type = f"{type_name}({type_params})" if type_params else type_name
+            null_clause = "NULL" if is_nullable else "NOT NULL"
+            col_defs.append(f"    [{col_name}] {col_type} {null_clause}")
+
+        create_ddl = f"CREATE TABLE [{table_name}] (\n" + ",\n".join(col_defs) + "\n)"
+        drop_ddl   = f"IF OBJECT_ID('{table_name}', 'U') IS NOT NULL DROP TABLE [{table_name}]"
+
+        try:
+            with tgt_engine.begin() as conn:
+                conn.exec_driver_sql(drop_ddl)
+                conn.exec_driver_sql(create_ddl)
+            logger.info(f"  ✅ 已依 source schema 建立 [{table_name}]（{len(col_defs)} 欄）")
+            return True
+        except Exception as drop_err:
+            # 無法 DROP（例如其他表有 FK 指向此表），改 TRUNCATE 清空舊資料
+            logger.warning(f"  ⚠️ 無法重建 {table_name}（{drop_err}），改用 TRUNCATE 保留現有 schema")
+            try:
+                with tgt_engine.begin() as conn:
+                    conn.exec_driver_sql(f"TRUNCATE TABLE [{table_name}]")
+                logger.info(f"  ✅ 已 TRUNCATE [{table_name}]，將複製數值")
+                return True
+            except Exception as trunc_err:
+                logger.warning(f"  ⚠️ TRUNCATE {table_name} 失敗：{trunc_err}，將由 pandas 自動建立結構")
+                return False
+
+    except Exception as e:
+        logger.warning(f"  ⚠️ 預建 {table_name} schema 失敗：{e}，將由 pandas 自動建立結構")
+        return False
+
+
 def fetch_ddl(engine, object_name: str, object_type: str) -> str:
     """
     Views / SPs / Functions：使用 OBJECT_DEFINITION(OBJECT_ID(name))
@@ -2154,7 +2222,15 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
         
         try:
             if source_engine and target_engine:
-                # 真實執行
+                # 真實執行 — 先依 source schema 建立正確的目標資料表結構
+                schema_ok = create_target_table_from_source(source_engine, target_engine, table)
+                if not schema_ok:
+                    logger.warning(
+                        f"  🚨 [{table}] DROP 與 TRUNCATE 均失敗 — 將直接 APPEND 至現有資料表！"
+                        f"\n     ⚠️  若表中已有資料，本次複製將造成資料重複累加（Double Data）。"
+                        f"\n     請手動確認 target [{table}] 是否需要先清空。"
+                    )
+
                 with source_engine.connect() as conn:
                     total_count = conn.exec_driver_sql(count_query).scalar()
 
@@ -2163,11 +2239,12 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
                     for chunk in pd.read_sql(query, source_engine, chunksize=chunk_size):
                         # 套用去識別化
                         chunk = apply_anonymization(chunk, table)
-                    
-                        # Fix encoding issues for Chinese characters
+
+                        # 若預建 schema 失敗，仍用 NVARCHAR 保底（中文相容）；
+                        # 若成功，表格已建好，dtype_map 僅作為 pymssql 的型別提示，不影響 DDL
                         dtype_map = {c: NVARCHAR for c in chunk.select_dtypes(include=['object', 'str']).columns}
 
-                        # 寫入目標資料庫
+                        # 寫入目標資料庫（表格已存在，永遠 append）
                         chunk.to_sql(table, target_engine, if_exists='append', index=False, dtype=dtype_map)
                         pbar.update(len(chunk))
             else:
