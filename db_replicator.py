@@ -14,7 +14,8 @@ import logging
 # --- Logging Setup ---
 # Generate Log Filename based on date
 CURRENT_DATE_STR = datetime.now().strftime('%Y%m%d')
-LOG_FILENAME = f"{CURRENT_DATE_STR}_Clone.log"
+LOG_FILENAME          = f"{CURRENT_DATE_STR}_Clone.log"
+RETRY_SCRIPT_FILENAME = f"{CURRENT_DATE_STR}_Clone_Retry.sql"
 DATE_SALT = CURRENT_DATE_STR  # Use same date string for salt
 
 # Configure Logging
@@ -1958,11 +1959,13 @@ def topological_sort(objects: List[str], engine) -> List[str]:
 
     return sorted_objects
 
-def clone_views(selected_views: List[str], src_engine, tgt_engine, src_db: str, tgt_db: str) -> None:
+def clone_views(selected_views: List[str], src_engine, tgt_engine, src_db: str, tgt_db: str,
+                retry_items: list = None) -> None:
     if not selected_views: return
     sorted_views = topological_sort(selected_views, src_engine)
     logger.info(f"開始複製 Views ({len(sorted_views)} 個)")
     for view in sorted_views:
+        ddl = ""
         try:
             ddl = fetch_ddl(src_engine, view, "VIEW")
             ddl = preprocess_ddl(ddl, src_db, tgt_db)
@@ -1977,19 +1980,33 @@ def clone_views(selected_views: List[str], src_engine, tgt_engine, src_db: str, 
             logger.info(f"✅ View {view} 複製成功")
         except Exception as e:
             logger.error(f"❌ View {view} 複製失敗: {e}")
+            if retry_items is not None and ddl.strip():
+                safe_str = view.replace("'", "''")
+                safe_id  = view.replace("]", "]]")
+                retry_items.append({
+                    "obj_type": "VIEW",
+                    "name": view,
+                    "ddl": ddl,
+                    "drop_stmt": f"IF OBJECT_ID('{safe_str}', 'V') IS NOT NULL DROP VIEW [{safe_id}];",
+                    "error": str(e),
+                })
 
-def clone_sps_and_functions(selected: List[str], src_engine, tgt_engine, src_db: str, tgt_db: str, is_func: bool) -> None:
+def clone_sps_and_functions(selected: List[str], src_engine, tgt_engine, src_db: str, tgt_db: str,
+                            is_func: bool, retry_items: list = None) -> None:
     if not selected: return
     sorted_objs = topological_sort(selected, src_engine)
     obj_type_str = "Function" if is_func else "Stored Procedure"
     logger.info(f"開始複製 {obj_type_str}s ({len(sorted_objs)} 個)")
-    
+
     for obj in sorted_objs:
+        ddl = ""
         try:
             ddl = fetch_ddl(src_engine, obj, "FUNCTION" if is_func else "SP")
             ddl = preprocess_ddl(ddl, src_db, tgt_db)
             drop_type = "FUNCTION" if is_func else "PROCEDURE"
-            drop_stmt = f"IF OBJECT_ID('{obj}') IS NOT NULL AND OBJECTPROPERTY(OBJECT_ID('{obj}'), 'IsMSShipped') = 0 DROP {drop_type} {obj};"
+            safe_str = obj.replace("'", "''")
+            safe_id  = obj.replace("]", "]]")
+            drop_stmt = f"IF OBJECT_ID('{safe_str}') IS NOT NULL AND OBJECTPROPERTY(OBJECT_ID('{safe_str}'), 'IsMSShipped') = 0 DROP {drop_type} [{safe_id}];"
             with tgt_engine.connect() as conn:
                 conn.exec_driver_sql(drop_stmt)
                 if ddl.strip():
@@ -1998,15 +2015,30 @@ def clone_sps_and_functions(selected: List[str], src_engine, tgt_engine, src_db:
             logger.info(f"✅ {obj_type_str} {obj} 複製成功")
         except Exception as e:
             logger.error(f"❌ {obj_type_str} {obj} 複製失敗: {e}")
+            if retry_items is not None and ddl.strip():
+                safe_str = obj.replace("'", "''")
+                safe_id  = obj.replace("]", "]]")
+                drop_type = "FUNCTION" if is_func else "PROCEDURE"
+                retry_items.append({
+                    "obj_type": "FUNCTION" if is_func else "SP",
+                    "name": obj,
+                    "ddl": ddl,
+                    "drop_stmt": f"IF OBJECT_ID('{safe_str}') IS NOT NULL DROP {drop_type} [{safe_id}];",
+                    "error": str(e),
+                })
 
-def clone_triggers(selected_triggers: List[str], src_engine, tgt_engine, src_db: str, tgt_db: str) -> None:
+def clone_triggers(selected_triggers: List[str], src_engine, tgt_engine, src_db: str, tgt_db: str,
+                   retry_items: list = None) -> None:
     if not selected_triggers: return
     logger.warning(f"⚠️ 注意：開始複製 Triggers ({len(selected_triggers)} 個)，請確認其對目標 DB 寫入無干擾。")
     for obj in selected_triggers:
+        ddl = ""
         try:
             ddl = fetch_ddl(src_engine, obj, "TRIGGER")
             ddl = preprocess_ddl(ddl, src_db, tgt_db)
-            drop_stmt = f"IF OBJECT_ID('{obj}', 'TR') IS NOT NULL DROP TRIGGER {obj};"
+            safe_str = obj.replace("'", "''")
+            safe_id  = obj.replace("]", "]]")
+            drop_stmt = f"IF OBJECT_ID('{safe_str}', 'TR') IS NOT NULL DROP TRIGGER [{safe_id}];"
             with tgt_engine.connect() as conn:
                 conn.exec_driver_sql(drop_stmt)
                 if ddl.strip():
@@ -2015,6 +2047,80 @@ def clone_triggers(selected_triggers: List[str], src_engine, tgt_engine, src_db:
             logger.info(f"✅ Trigger {obj} 複製成功")
         except Exception as e:
             logger.error(f"❌ Trigger {obj} 複製失敗: {e}")
+            if retry_items is not None and ddl.strip():
+                safe_str = obj.replace("'", "''")
+                safe_id  = obj.replace("]", "]]")
+                retry_items.append({
+                    "obj_type": "TRIGGER",
+                    "name": obj,
+                    "ddl": ddl,
+                    "drop_stmt": f"IF OBJECT_ID('{safe_str}', 'TR') IS NOT NULL DROP TRIGGER [{safe_id}];",
+                    "error": str(e),
+                })
+
+def write_retry_script(retry_items: list, src_db: str, tgt_db: str) -> None:
+    """
+    將 Clone 過程中失敗的 DDL 物件輸出為可重執行的 SQL 腳本。
+    使用者補設 Linked Server 等環境後，直接執行此腳本即可。
+    """
+    if not retry_items:
+        return
+
+    linked_servers: set[str] = set()
+    for item in retry_items:
+        m = re.search(r"Could not find server '([^']+)'", item["error"])
+        if m:
+            linked_servers.add(m.group(1))
+
+    header_lines = [
+        "-- ================================================================",
+        f"-- Clone Retry Script  |  產生時間: {CURRENT_DATE_STR}",
+        f"-- Source DB: [{src_db}]",
+        f"-- Target DB: [{tgt_db}]",
+        "--",
+        f"-- 共 {len(retry_items)} 個物件因環境因素無法自動複製。",
+    ]
+    if linked_servers:
+        header_lines.append("-- 執行前請先在 Target SQL Server 設定以下 Linked Server：")
+        for ls in sorted(linked_servers):
+            header_lines.append(f"--   EXEC sp_addlinkedserver '{ls}', '<provider>', '<datasrc>', ...")
+    header_lines += [
+        "-- ================================================================",
+        "",
+        f"USE [{tgt_db.replace(']', ']]')}];",
+        "GO",
+        "",
+    ]
+
+    type_order  = ["VIEW", "FUNCTION", "SP", "TRIGGER"]
+    type_labels = {"VIEW": "VIEWS", "FUNCTION": "FUNCTIONS",
+                   "SP": "STORED PROCEDURES", "TRIGGER": "TRIGGERS"}
+    by_type = {t: [i for i in retry_items if i["obj_type"] == t] for t in type_order}
+
+    body_lines: list[str] = []
+    for obj_type in type_order:
+        items = by_type[obj_type]
+        if not items:
+            continue
+        label = type_labels[obj_type]
+        body_lines.append(f"-- ── {label} ({len(items)}) {'─' * max(0, 54 - len(label))}")
+        body_lines.append("")
+        for item in items:
+            short_err = str(item["error"]).split("\n")[0][:160]
+            body_lines.append(f"-- [{item['name']}]")
+            body_lines.append(f"-- 失敗原因: {short_err}")
+            body_lines.append(item["drop_stmt"])
+            body_lines.append("GO")
+            if item["ddl"].strip():
+                body_lines.append(item["ddl"].strip())
+                body_lines.append("GO")
+            body_lines.append("")
+
+    with open(RETRY_SCRIPT_FILENAME, "w", encoding="utf-8") as f:
+        f.write("\n".join(header_lines + body_lines))
+
+    logger.info(f"📄 {len(retry_items)} 個失敗物件的 DDL 已輸出至 {RETRY_SCRIPT_FILENAME}")
+
 
 def get_db_connection(args=None, project=None):
     """
@@ -2286,22 +2392,30 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
             logger.error(f"❌ 處理 {table} 時發生錯誤: {e}")
             continue
 
+    retry_items: list = []
+
     if source_engine and target_engine:
         # Phase 2: Views
         if selected_views:
-            clone_views(selected_views, source_engine, target_engine, src_db, tgt_db)
+            clone_views(selected_views, source_engine, target_engine, src_db, tgt_db,
+                        retry_items=retry_items)
 
         # Phase 3: Functions (before SPs to satisfy dependencies)
         if selected_funcs:
-            clone_sps_and_functions(selected_funcs, source_engine, target_engine, src_db, tgt_db, is_func=True)
+            clone_sps_and_functions(selected_funcs, source_engine, target_engine, src_db, tgt_db,
+                                    is_func=True, retry_items=retry_items)
 
         # Phase 4: SPs
         if selected_sps:
-            clone_sps_and_functions(selected_sps, source_engine, target_engine, src_db, tgt_db, is_func=False)
+            clone_sps_and_functions(selected_sps, source_engine, target_engine, src_db, tgt_db,
+                                    is_func=False, retry_items=retry_items)
 
         # Phase 5: Triggers
         if selected_triggers:
-            clone_triggers(selected_triggers, source_engine, target_engine, src_db, tgt_db)
+            clone_triggers(selected_triggers, source_engine, target_engine, src_db, tgt_db,
+                           retry_items=retry_items)
+
+        write_retry_script(retry_items, src_db, tgt_db)
     else:
         logger.info("Demo 模式：略過 View / SP / Function / Trigger 的實際複製")
 
