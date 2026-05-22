@@ -655,3 +655,8 @@ class ConfigManager:
             logger.info(f"Exported Deploy Profile for project '{project.name}' to: {abs_path}")
             return abs_path
 
+
+# Module-level singleton — import this instead of constructing locally.
+config_mgr = ConfigManager()
+config_mgr.migrate_json_if_needed()
+
