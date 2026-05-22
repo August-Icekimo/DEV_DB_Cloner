@@ -1793,7 +1793,12 @@ def create_target_table_from_source(src_engine, tgt_engine, table_name: str) -> 
             c.name,
             tp.name AS type_name,
             CASE
-                WHEN tp.name IN ('varchar','char','varbinary','binary')
+                -- varchar/char: 放寬 1.5x 以容納 CP950→UTF-8 膨脹（CJK: 2 bytes → 3 bytes）
+                WHEN tp.name IN ('varchar','char')
+                    THEN CASE WHEN c.max_length = -1 THEN 'MAX'
+                              WHEN CEILING(c.max_length * 1.5) > 8000 THEN 'MAX'
+                              ELSE CAST(CEILING(c.max_length * 1.5) AS VARCHAR) END
+                WHEN tp.name IN ('varbinary','binary')
                     THEN CASE WHEN c.max_length = -1 THEN 'MAX'
                               ELSE CAST(c.max_length AS VARCHAR) END
                 WHEN tp.name IN ('nvarchar','nchar')
@@ -1896,6 +1901,14 @@ def preprocess_ddl(ddl: str, src_db: str, tgt_db: str) -> str:
     pattern = re.compile(re.escape(f"[{src_db}]"), re.IGNORECASE)
     ddl = pattern.sub(f"[{tgt_db}]", ddl)
     
+    # 確保 CREATE/ALTER VIEW 後的物件名稱有 [] 包裹（處理名稱含連字號等特殊字元）
+    ddl = re.sub(
+        r'(?i)((?:CREATE|ALTER)\s+(?:OR\s+ALTER\s+)?VIEW\s+(?:\[?\w+\]?\.)?)(?!\[)([\w\-]+)',
+        r'\1[\2]',
+        ddl,
+        count=1,
+    )
+
     # 修正 "The data types float and int are incompatible in the modulo operator"
     # 將 sum(...) % N 或 isNull(sum(...), 0) % N 轉換為 CAST(... AS INT) % N
     # 這樣可以避免 float 型態直接進入 modulo 運算
@@ -1953,7 +1966,9 @@ def clone_views(selected_views: List[str], src_engine, tgt_engine, src_db: str, 
         try:
             ddl = fetch_ddl(src_engine, view, "VIEW")
             ddl = preprocess_ddl(ddl, src_db, tgt_db)
-            drop_stmt = f"IF OBJECT_ID('{view}', 'V') IS NOT NULL DROP VIEW {view};"
+            safe_view_str = view.replace("'", "''")
+            safe_view_id  = view.replace("]", "]]")
+            drop_stmt = f"IF OBJECT_ID('{safe_view_str}', 'V') IS NOT NULL DROP VIEW [{safe_view_id}];"
             with tgt_engine.connect() as conn:
                 conn.exec_driver_sql(drop_stmt)
                 if ddl.strip():
