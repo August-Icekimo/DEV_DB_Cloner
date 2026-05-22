@@ -1794,11 +1794,12 @@ def create_target_table_from_source(src_engine, tgt_engine, table_name: str) -> 
             c.name,
             tp.name AS type_name,
             CASE
-                -- varchar/char: 放寬 1.5x 以容納 CP950→UTF-8 膨脹（CJK: 2 bytes → 3 bytes）
+                -- varchar/char: 放寬 2x 以容納 CP950→UTF-8 最大膨脹
+                -- 罕見字/補充字集 (U+20000+) 及 Latin-1 誤讀情境均為 2x，1.5x 不足
                 WHEN tp.name IN ('varchar','char')
                     THEN CASE WHEN c.max_length = -1 THEN 'MAX'
-                              WHEN CEILING(c.max_length * 1.5) > 8000 THEN 'MAX'
-                              ELSE CAST(CEILING(c.max_length * 1.5) AS VARCHAR) END
+                              WHEN c.max_length * 2 > 8000 THEN 'MAX'
+                              ELSE CAST(c.max_length * 2 AS VARCHAR) END
                 WHEN tp.name IN ('varbinary','binary')
                     THEN CASE WHEN c.max_length = -1 THEN 'MAX'
                               ELSE CAST(c.max_length AS VARCHAR) END
