@@ -16,6 +16,7 @@
   - **動態 Salt**: 依據執行日期動態產生混淆種子，確保當日結果一致，不同日結果不同。
 - **Unicode 支援**: 強制修正編碼問題 (NVARCHAR)，確保中文資料正確寫入。
 - **高效傳輸**: 支援分批次 (Batch) 讀取與寫入，並顯示進度條。
+- **無人值守部署 (Headless Mode)**: 支援讀取 Deploy Profile JSON，透過 CLI 實現自動化批次執行，無需人工干預 TUI。
 
 ---
 
@@ -55,6 +56,7 @@
 
 - 程式會在執行目錄下自動產生 `config.db`（SQLite），儲存你的所有專案設定。
 - **升級版本或搬移目錄時，請一併攜帶 `config.db`**，否則專案設定會遺失。
+- **(v1.3.0 升級須知)** 本版本優化了 `save_project_state` 邏輯，建議在升級前匯出舊有專案設定作為備份。
 - **(v1.2.0 升級須知)** 若您從舊版升級，請手動執行以下指令將資料庫結構升級：
   ```bash
   sqlite3 config.db "ALTER TABLE project_tables ADD COLUMN object_type VARCHAR DEFAULT 'TABLE'; UPDATE project_tables SET object_type = 'TABLE' WHERE object_type IS NULL; SELECT id, table_name, object_type FROM project_tables LIMIT 10;"
@@ -110,7 +112,7 @@ python db_replicator.py
 2. **物件選擇畫面 (Table/View/SP...)** — 選取要複製的資料庫物件
    - **分頁切換**：`1` Tables / `2` Views / `3` Stored Procedures / `4` Functions / `5` Triggers
    - `Space` 選取 / `A` 全選 / `F` 篩選條件 / `P` PII 規則
-   - `Ctrl+O` 返回專案 / `S` 儲存 / `G` 開始複製 / `Q` 離開
+   - `Ctrl+O` 返回專案 / `S` 儲存 / `X` 匯出設定檔 / `G` 開始複製 / `Q` 離開
 
 3. **執行複製** — 批次讀取、去敏化、寫入目標資料庫
 
@@ -118,6 +120,19 @@ python db_replicator.py
 模擬複製過程而不實際連接資料庫：
 ```bash
 python db_replicator.py --demo
+```
+
+### 無人值守模式 (Headless Mode)
+
+使用預先導出的 Deploy Profile 執行自動化部署，跳過 TUI 互動：
+```bash
+python db_replicator.py --deploy-profile my_project_profile.json \
+  --src-pwd "source_password" --tgt-pwd "target_password"
+```
+或者使用環境變數：
+```bash
+export SRC_DB_PWD="your_password"
+python db_replicator.py --deploy-profile my_project_profile.json
 ```
 
 ## 設定與客制化 (Configuration)

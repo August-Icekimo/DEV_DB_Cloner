@@ -3,3 +3,4 @@ pandas>=2.0
 pymssql>=2.2
 tqdm>=4.60
 textual>=0.50.0
+isort>=5.0.0
