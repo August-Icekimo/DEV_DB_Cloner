@@ -1,36 +1,68 @@
-# 版本發佈 v1.3.0 (Pre) — 2026-04-28
+# 版本發佈 v1.3.0 (Pre) — 2026-05-22
 
-## 實作 DDL Deploy Profile：支援 CLI 無人值守部署與設定匯出
-**feat: DDL Deploy Profile, Headless Batch Deployment and TUI Export Workflow**
+## 模組拆分、Clone 穩定性修正與失敗 DDL Retry Script
+**refactor + fix: module split, CP950 truncation fix, DDL syntax fixes, retry script output**
 
 ---
 
-### 1. DDL Deploy Profile (設定檔匯出)
+### 1. 模組架構拆分 (Module Split)
+
+將原本 2,649 行的 `db_replicator.py` 拆分為三個職責清晰的獨立模組，大幅降低日後維護與 context 負擔：
+
+| 新檔案 | 行數 | 職責 |
+|:---|:---:|:---|
+| `clone_engine.py` | 470 | 所有 DB fetch、DDL 前處理、clone 執行、retry script、連線建立 |
+| `tui_screens.py` | 1,314 | 所有 Textual TUI 畫面類別 |
+| `db_replicator.py` | 471 | 薄 orchestration layer（原 2,649 行）|
+
+- `config_manager.py` 新增 module-level `config_mgr` singleton，各模組直接 import，避免循環依賴。
+- Import graph 嚴格保持無環：`db_replicator → clone_engine / tui_screens / config_manager / data_anonymizer`；`tui_screens → clone_engine / config_manager`。
+
+### 2. varchar 截斷修正 (CP950 → UTF-8 2x 膨脹)
+
+- **問題**：pymssql 以 CP950 bigram bytes 讀取後，UTF-8 最大膨脹率可達 2x（罕見字、補充字集 U+20000+ 及 Latin-1 誤讀情境均為 2x，原 1.5x 不足）。複製 `SALARY_TXN.txn_reason` 等欄位時會觸發 SQL Server 錯誤 2628（String or binary data would be truncated）。
+- **修正**：`create_target_table_from_source` 建立目標資料表時，`varchar`/`char` 欄位長度一律乘以 **2**（上限 8000 者自動轉為 `MAX`）。
+
+### 3. View 名稱含連字號語法修正
+
+- **問題**：`OBJECT_DEFINITION()` 回傳的 DDL 中，含 `-` 的 View 名稱未加中括號，導致 T-SQL 解析為減法運算，觸發錯誤 102（Incorrect syntax）。
+- **修正**：`preprocess_ddl()` 新增 regex，對 `CREATE/ALTER VIEW` 後的物件名稱補上 `[bracket]`；`DROP VIEW` / `DROP PROCEDURE` / `DROP TRIGGER` 的動態語句同步修正為 `[{safe_id}]` 格式。
+
+### 4. 失敗 DDL Retry Script 輸出
+
+- **功能**：每次 clone 結束後，若有 View / SP / Function / Trigger 因環境因素（如 Linked Server 未設定）失敗，自動將其 DDL 輸出至 `YYYYMMDD_Clone_Retry.sql`。
+- **格式**：每段 DDL 前附帶冪等 `DROP` 語句，可在目標環境設定完成後直接重複執行。
+- **適用情境**：開發環境缺少正式環境 Linked Server 時，先完成資料表複製，事後再補建 DDL 物件。
+
+---
+
+### 5. DDL Deploy Profile (設定檔匯出) ← 2026-04-28
+
 - **標準化 Schema**：實作 JSON v1.0 規範，完整封裝資料表、檢視表、預存程序等物件選取，以及對應的篩選條件與 PII 規則。
-- **TUI 匯出工作流**：在物件選擇畫面新增 `X` 快捷鍵，支援：
-    - **差異偵測**：自動比對記憶體與資料庫狀態，顯示「設定已更新」或「設定無差異」提示。
-    - **路徑自定義**：彈出式視窗可自由調整匯出檔名。
-    - **安全警告**：若設定檔包含 Trigger，匯出時會自動提示潛在風險。
+- **TUI 匯出工作流**：在物件選擇畫面新增 `X` 快捷鍵，支援差異偵測、路徑自定義、Trigger 安全警告。
 
-### 2. 無人值守部署 (Headless Mode)
+### 6. 無人值守部署 (Headless Mode) ← 2026-04-28
+
 - **CLI 整合**：新增 `--deploy-profile <PATH>` 參數，可跳過 TUI 直接進入複製流程。
-- **嚴謹驗證**：Headless 模式下強制執行 PII 函數白名單檢查與連線參數完整性驗證，確保自動化腳本執行安全。
-- **靈活連線**：支援從 CLI 參數或環境變數 (`SRC_DB_PWD` 等) 讀取敏感連線資訊，方便整合 CI/CD。
-- **姓名資料自動關聯**：Headless 模式會自動嘗試從 `config.db` 找尋同名專案以套用對應的姓名來源設定。
+- **嚴謹驗證**：Headless 模式下強制執行 PII 函數白名單檢查與連線參數完整性驗證。
+- **靈活連線**：支援從 CLI 參數或環境變數 (`SRC_DB_PWD` 等) 讀取敏感連線資訊。
+- **姓名資料自動關聯**：自動從 `config.db` 找尋同名專案以套用對應的姓名來源設定。
 
-### 3. ConfigManager 與核心重構
-- **狀態隔離**：修正 `save_project_state` 邏輯，確保儲存 Table 設定時不會誤觸其他物件 (View/SP) 的選取狀態。
-- **邏輯抽離**：將核心複製引擎重構為 `_execute_replication` 獨立函數，達成 TUI 與 Headless 程式碼高度共用。
+### 7. ConfigManager 核心重構 ← 2026-04-28
+
+- **狀態隔離**：修正 `save_project_state` 邏輯，確保儲存 Table 設定時不會誤觸其他物件的選取狀態。
 - **白名單驗證**：新增 `VALID_ANON_FUNCTIONS` 常數，強化去敏化流程的安全性。
 
+### 升級須知
+
+> `config.db` 結構無需任何修改。若使用 PyInstaller 打包，需確認 `clone_engine.py` 與 `tui_screens.py` 已納入 spec 檔的 `datas` 或 `hiddenimports`。
+
 ### 無人值守模式 (Headless Mode)
-使用預先導出的 Deploy Profile 執行自動化部署：
 ```bash
 python db_replicator.py --deploy-profile my_project_profile.json \
   --src-pwd "source_password" --tgt-pwd "target_password"
-```
-或者使用環境變數：
-```bash
+
+# 或使用環境變數
 export SRC_DB_PWD="your_password"
 python db_replicator.py --deploy-profile my_project_profile.json
 ```

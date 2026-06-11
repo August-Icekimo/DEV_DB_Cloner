@@ -14,9 +14,22 @@
 - **稽核與追蹤 (Audit & Traceability)**:
   - **日誌記錄 (Logging)**: 自動產生 `YYYYMMDD_Clone.log`，詳實記錄執行過程與 Before/After 樣本。
   - **動態 Salt**: 依據執行日期動態產生混淆種子，確保當日結果一致，不同日結果不同。
-- **Unicode 支援**: 強制修正編碼問題 (NVARCHAR)，確保中文資料正確寫入。
+- **Unicode 支援**: 自動偵測 CP950→UTF-8 最大膨脹率（2x）並放寬欄位長度，確保中文資料正確寫入，不再發生截斷錯誤。
 - **高效傳輸**: 支援分批次 (Batch) 讀取與寫入，並顯示進度條。
 - **無人值守部署 (Headless Mode)**: 支援讀取 Deploy Profile JSON，透過 CLI 實現自動化批次執行，無需人工干預 TUI。
+- **Retry Script**: 複製結束後自動輸出 `YYYYMMDD_Clone_Retry.sql`，將因 Linked Server 等環境因素失敗的 DDL 整理為可重執行腳本，方便事後補建。
+
+---
+
+## 模組架構 (Architecture)
+
+| 檔案 | 職責 |
+|:---|:---|
+| `db_replicator.py` | 薄 orchestration layer：日誌設定、`apply_anonymization`、`_execute_replication`、`run_replication`、CLI 入口 |
+| `clone_engine.py` | 所有 DB 操作：fetch 物件清單、建立目標資料表、DDL 前處理、clone 執行、Retry Script 輸出、連線建立 |
+| `tui_screens.py` | 所有 Textual TUI 畫面類別（`ProjectSelector`、`TableSelector` 及所有 ModalScreen）|
+| `config_manager.py` | SQLAlchemy ORM 模型、`ConfigManager` 類別、`config_mgr` singleton |
+| `data_anonymizer.py` | 所有 PII 去識別化函數 |
 
 ---
 
@@ -56,7 +69,7 @@
 
 - 程式會在執行目錄下自動產生 `config.db`（SQLite），儲存你的所有專案設定。
 - **升級版本或搬移目錄時，請一併攜帶 `config.db`**，否則專案設定會遺失。
-- **(v1.3.0 升級須知)** 本版本優化了 `save_project_state` 邏輯，建議在升級前匯出舊有專案設定作為備份。
+- **(v1.3.0 升級須知)** 本版本將 `db_replicator.py` 拆分為三個獨立模組（`clone_engine.py`、`tui_screens.py`、薄 orchestration `db_replicator.py`）。若使用 PyInstaller 打包，需確保三個新模組均包含在 spec 檔案中；功能與設定完全相容，`config.db` 無需任何升級動作。
 - **(v1.2.0 升級須知)** 若您從舊版升級，請手動執行以下指令將資料庫結構升級：
   ```bash
   sqlite3 config.db "ALTER TABLE project_tables ADD COLUMN object_type VARCHAR DEFAULT 'TABLE'; UPDATE project_tables SET object_type = 'TABLE' WHERE object_type IS NULL; SELECT id, table_name, object_type FROM project_tables LIMIT 10;"
