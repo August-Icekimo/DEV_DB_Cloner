@@ -12,3 +12,7 @@ lib64/
 build/
 tmp/
 config.db
+# DDL 備份輸出：內含各專案獨立的 git repo，且可能帶有內部主機名與商業邏輯
+sql_backup/
+# Clone 失敗時輸出的 Retry Script，同樣含來源端 DDL
+*_Clone_Retry.sql

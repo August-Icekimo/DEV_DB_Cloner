@@ -163,8 +163,11 @@ def fetch_dependencies(engine, object_name: str) -> List[Dict[str, str]]:
         return deps
 
 
-def preprocess_ddl(ddl: str, src_db: str, tgt_db: str) -> str:
+def retarget_ddl(ddl: str, src_db: str, tgt_db: str) -> str:
     """
+    將來源 DDL 調整為可在 Target DB 執行的形式。**僅供 clone 流程使用**——
+    備份流程絕不可呼叫，否則存下來的會是目標端版本，git 比對基準就失真了。
+
     1. 用 regex 替換三段式名稱中的來源 DB 名稱為目標 DB 名稱
     2. 確保 CREATE/ALTER VIEW 後的物件名稱有 [] 包裹
     3. 修正常見的 SQL Server 語法相容性問題 (如 float % int)
@@ -190,6 +193,12 @@ def preprocess_ddl(ddl: str, src_db: str, tgt_db: str) -> str:
     )
 
     return ddl
+
+
+# 保留原名供 clone 流程呼叫，行為與拆分前完全一致。
+# 待日後要把 clone 也切換成 CREATE OR ALTER 時，
+# 在此串上 ddl_backup.normalize_ddl() 並移除各 clone_* 的 DROP 敘述即可。
+preprocess_ddl = retarget_ddl
 
 
 def topological_sort(objects: List[str], engine) -> List[str]:
