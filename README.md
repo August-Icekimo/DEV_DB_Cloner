@@ -30,6 +30,7 @@
 | `tui_screens.py` | 所有 Textual TUI 畫面類別（`ProjectSelector`、`TableSelector` 及所有 ModalScreen）|
 | `config_manager.py` | SQLAlchemy ORM 模型、`ConfigManager` 類別、`config_mgr` singleton |
 | `data_anonymizer.py` | 所有 PII 去識別化函數 |
+| `ddl_backup.py` | DDL 快照備份：物件定義批次抓取、T-SQL 前導雜訊掃描、檔案同步、git 唯讀檢查 |
 
 ---
 
@@ -147,6 +148,55 @@ python db_replicator.py --deploy-profile my_project_profile.json \
 export SRC_DB_PWD="your_password"
 python db_replicator.py --deploy-profile my_project_profile.json
 ```
+
+### DDL 備份 (Backup DDL)
+
+將 Source DB 的 View / Stored Procedure / Function / Trigger 匯出成一物件一檔的
+`.sql` 快照，讓備份目錄成為**獨立的 git repo**，以 `git diff` 追蹤 DDL 變更歷史。
+
+```bash
+# 首次使用：備份目錄必須由使用者自行 git init（工具對 git 唯讀）
+mkdir -p sql_backup/HRM && git -C sql_backup/HRM init
+
+# 先試跑，確認會新增/更新/刪除哪些檔案
+python db_replicator.py --backup-ddl HRM --dry-run \
+  --src-server 172.22.1.34 --src-database hrm --src-uid sa --src-pwd "password"
+
+# 實際執行
+python db_replicator.py --backup-ddl HRM \
+  --src-server 172.22.1.34 --src-database hrm --src-uid sa --src-pwd "password"
+
+# 檢視變更後提交
+cd sql_backup/HRM && git diff && git add -A && git commit -m "DDL snapshot"
+```
+
+僅需 Source 連線，不會連線或寫入 Target。輸出結構：
+
+```
+sql_backup/HRM/            ← 獨立 git repo，外層 .gitignore 已排除 sql_backup/
+├── README.md              ← 首次執行產生的 HOWTO，供 AI Agent 改寫為正式說明
+├── _manifest.json         ← 執行資訊與 skipped 清單（已 gitignore）
+├── Views/dbo.V_Emp.sql
+├── Functions/dbo.fn_Bar.sql
+├── StoredProcedures/dbo.usp_Foo.sql
+└── Triggers/dbo.TRG_Baz.sql
+```
+
+**行為說明**
+
+| 項目 | 說明 |
+|:---|:---|
+| 備份範圍 | 全庫，四類 programmable objects。**不含 table 結構** |
+| DDL 內容 | 來自 `sys.sql_modules`，開頭動詞正規化為 `CREATE OR ALTER`（需 SQL Server 2016 SP1+），換行統一 LF。**不做** DB 名稱替換 |
+| 刪除同步 | 來源已不存在的物件，其 `.sql` 檔會被刪除，git 才看得出物件被移除 |
+| 加密 / CLR 物件 | 無 T-SQL 定義，既不寫入也不刪除既有檔案，列入報表的 skipped |
+| 中止保護 | 執行前檢查備份目錄是否為 git repo、working tree 是否乾淨（可用 `--allow-dirty` 略過）|
+| 失敗處理 | 抓取為單一 query，失敗時完全不動檔案；落檔階段先寫入更新、最後才刪除，崩潰只會留下多餘檔而非缺檔 |
+
+**不涵蓋**：物件權限、extended properties、synonym、使用者自訂型別、sequence、
+以及所有 table 結構。這不是災難復原用的備份。
+
+`.sql` 檔可能含有內部主機名、IP 與商業邏輯，請確認備份 repo 的存放位置合乎資安規範。
 
 ## 設定與客制化 (Configuration)
 

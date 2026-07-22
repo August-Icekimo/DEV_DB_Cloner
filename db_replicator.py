@@ -101,6 +101,8 @@ from clone_engine import (
 
 from tui_screens import ProjectSelector, TableSelector
 
+import ddl_backup
+
 # ---------------------------------------------------------------------------
 # Anonymization dispatcher
 # ---------------------------------------------------------------------------
@@ -325,6 +327,40 @@ def _validate_headless_connections(args):
 # Entry point
 # ---------------------------------------------------------------------------
 
+def run_ddl_backup(args) -> int:
+    """--backup-ddl 入口。只需要 Source 連線，不建立 Target 連線。"""
+    cfg = ddl_backup.resolve_source_config(args)
+
+    required = [
+        ("server",   "--src-server",   "SRC_DB_SERVER"),
+        ("database", "--src-database", "SRC_DB_NAME"),
+        ("uid",      "--src-uid",      "SRC_DB_UID"),
+        ("pwd",      "--src-pwd",      "SRC_DB_PWD"),
+    ]
+    missing = [f"{flag} 或 {env}" for key, flag, env in required if not cfg[key]]
+    if missing:
+        logger.error("❌ DDL 備份需指定來源連線參數：")
+        for m in missing:
+            logger.error(f"   - 缺失: {m}")
+        return 1
+
+    try:
+        engine = ddl_backup.create_source_engine(cfg)
+    except Exception as e:
+        logger.error(f"❌ 來源資料庫連線失敗: {e}")
+        return 1
+
+    return ddl_backup.run_backup(
+        engine,
+        project_name  = args.backup_ddl,
+        src_server    = cfg["server"],
+        src_database  = cfg["database"],
+        backup_root   = args.backup_root,
+        dry_run       = args.dry_run,
+        allow_dirty   = args.allow_dirty,
+    )
+
+
 def run_replication(args=None):
     # --- Headless path ---
     if args and args.deploy_profile:
@@ -452,6 +488,16 @@ if __name__ == "__main__":
     parser.add_argument("--deploy-profile", metavar="PATH",
                         help="Deploy Profile JSON 路徑，指定後跳過 TUI 直接執行批次部署")
 
+    parser.add_argument("--backup-ddl", metavar="PROJECT_NAME",
+                        help="將 Source DB 的 View/SP/Function/Trigger 匯出至 "
+                             "<backup-root>/<PROJECT_NAME>/，跳過 TUI")
+    parser.add_argument("--backup-root", metavar="PATH", default=ddl_backup.DEFAULT_BACKUP_ROOT,
+                        help=f"備份輸出根目錄（預設 {ddl_backup.DEFAULT_BACKUP_ROOT}）")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="僅列出會新增/更新/刪除的檔案，不實際寫入")
+    parser.add_argument("--allow-dirty", action="store_true",
+                        help="備份目錄有未提交變更時仍強制執行")
+
     parser.add_argument("--src-server",   help="Source Database Server IP/Hostname")
     parser.add_argument("--src-database", help="Source Database Name")
     parser.add_argument("--src-uid",      help="Source Database User ID")
@@ -467,5 +513,8 @@ if __name__ == "__main__":
     if args.check_deps:
         print("Dependencies OK")
         sys.exit(0)
+
+    if args.backup_ddl:
+        sys.exit(run_ddl_backup(args))
 
     run_replication(args)
