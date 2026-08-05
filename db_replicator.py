@@ -228,6 +228,22 @@ def profile_to_payload(profile: dict) -> dict:
 # Core replication logic
 # ---------------------------------------------------------------------------
 
+def _text_dtype_map(chunk):
+    """
+    只把「真的是字串」的欄位宣告成 NVARCHAR（解決中文編碼問題）。
+
+    read_sql 用 coerce_float=False 之後，decimal 欄位會以 decimal.Decimal 物件
+    留在 object dtype 裡，不能再把整個 object dtype 當成文字看待。
+    此 map 只在 pandas 需要自行建表時生效（預建 schema 失敗的退路）。
+    """
+    dtype_map = {}
+    for col in chunk.select_dtypes(include=['object', 'str']).columns:
+        sample = chunk[col].dropna()
+        if sample.empty or isinstance(sample.iloc[0], str):
+            dtype_map[col] = NVARCHAR
+    return dtype_map
+
+
 def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
     selected_tables   = list(payload.get("tables",    []))
     selected_views    = list(payload.get("views",     []))
@@ -236,6 +252,8 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
     selected_triggers = list(payload.get("triggers",  []))
 
     logger.info("\n準備開始複製...\n")
+
+    schema_mismatches: list = []
 
     # Phase 1: Tables
     for table in selected_tables:
@@ -253,11 +271,14 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
 
         try:
             if source_engine and target_engine:
-                schema_ok = create_target_table_from_source(source_engine, target_engine, table)
+                schema_ok = create_target_table_from_source(source_engine, target_engine, table,
+                                                           mismatches=schema_mismatches)
                 if not schema_ok:
                     logger.warning(
                         f"  🚨 [{table}] DROP 與 TRUNCATE 均失敗 — 將直接 APPEND 至現有資料表！"
                         f"\n     ⚠️  若表中已有資料，本次複製將造成資料重複累加（Double Data）。"
+                        f"\n     ⚠️  若 target 尚無此表，將由 pandas 依 DataFrame 推導型別建表，"
+                        f"decimal / varbinary 會被建成文字欄位。"
                         f"\n     請手動確認 target [{table}] 是否需要先清空。"
                     )
                 with source_engine.connect() as conn:
@@ -265,9 +286,12 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
 
                 chunk_size = 5000
                 with tqdm(total=total_count, desc=f"Copying {table}", unit="rows") as pbar:
-                    for chunk in pd.read_sql(query, source_engine, chunksize=chunk_size):
-                        chunk    = apply_anonymization(chunk, table)
-                        dtype_map = {c: NVARCHAR for c in chunk.select_dtypes(include=['object', 'str']).columns}
+                    # coerce_float=False：預設的 True 會把 decimal.Decimal 轉成 float64，
+                    # 有效位數超過 ~15 位的欄位（如 decimal(38,10)）會在傳輸途中被四捨五入。
+                    for chunk in pd.read_sql(query, source_engine, chunksize=chunk_size,
+                                             coerce_float=False):
+                        chunk     = apply_anonymization(chunk, table)
+                        dtype_map = _text_dtype_map(chunk)
                         chunk.to_sql(table, target_engine, if_exists='append', index=False, dtype=dtype_map)
                         pbar.update(len(chunk))
             else:
@@ -301,6 +325,18 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
         write_retry_script(retry_items, src_db, tgt_db)
     else:
         logger.info("Demo 模式：略過 View / SP / Function / Trigger 的實際複製")
+
+    if schema_mismatches:
+        logger.error(
+            "\n🚨 以下資料表沿用了 target 既有結構，資料已寫入但欄位型別與 source 不符："
+        )
+        for item in schema_mismatches:
+            logger.error(f"   - {item}")
+        logger.error(
+            "   （v1.3.0 之前的版本由 pandas 推導建表，decimal 會變成 FLOAT，TRUNCATE 洗不掉）\n"
+            "   請先排除 DROP 失敗的原因（多半是 FK 或 schema binding），"
+            "手動 DROP 這些 target 資料表後重跑。\n"
+        )
 
     logger.info("\n所有作業完成！")
 

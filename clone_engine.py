@@ -7,7 +7,7 @@ import os
 import urllib.parse
 import logging
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from sqlalchemy import create_engine, inspect
 
@@ -47,56 +47,125 @@ def fetch_all_triggers(engine) -> List[str]:
 # Table schema creation
 # ---------------------------------------------------------------------------
 
-def create_target_table_from_source(src_engine, tgt_engine, table_name: str) -> bool:
+_COLUMN_QUERY = """
+    SELECT c.name, tp.name, c.max_length, c.precision, c.scale, c.is_nullable
+    FROM sys.columns c
+    JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+    WHERE c.object_id = OBJECT_ID('{table}')
+    ORDER BY c.column_id
+"""
+
+
+def fetch_column_defs(engine, table_name: str) -> List[tuple]:
+    """
+    回傳 [(name, type_name, max_length, precision, scale, is_nullable), ...]。
+    表不存在時回傳空 list。
+    """
+    query = _COLUMN_QUERY.format(table=table_name.replace("'", "''"))
+    with engine.connect() as conn:
+        return [tuple(row) for row in conn.exec_driver_sql(query)]
+
+
+def render_column_type(type_name, max_length, precision, scale,
+                       widen_ansi: bool = False) -> str:
+    """
+    把 sys.columns 的原始欄位資訊組成 T-SQL 型別字串。
+
+    widen_ansi=True 時 varchar/char 放寬 2x 以容納 CP950→UTF-8 最大膨脹
+    （罕見字/補充字集 U+20000+ 及 Latin-1 誤讀情境均為 2x，1.5x 不足）。
+    讀取 target 現況時要用 False，才不會把放寬後的寬度誤判成不符。
+    """
+    t = type_name.lower()
+    if t in ('varchar', 'char'):
+        if max_length == -1:
+            return f"{type_name}(MAX)"
+        size = max_length * 2 if widen_ansi else max_length
+        return f"{type_name}(MAX)" if size > 8000 else f"{type_name}({size})"
+    if t in ('varbinary', 'binary'):
+        return f"{type_name}(MAX)" if max_length == -1 else f"{type_name}({max_length})"
+    if t in ('nvarchar', 'nchar'):
+        return f"{type_name}(MAX)" if max_length == -1 else f"{type_name}({max_length // 2})"
+    if t in ('decimal', 'numeric'):
+        return f"{type_name}({precision},{scale})"
+    if t in ('datetime2', 'datetimeoffset', 'time'):
+        return f"{type_name}({scale})"
+    return type_name
+
+
+def _comparable(type_str: str) -> str:
+    """decimal 與 numeric 在 SQL Server 是同義詞，比對時視為相同。"""
+    return type_str.lower().replace(' ', '').replace('numeric(', 'decimal(')
+
+
+def diff_target_schema(src_engine, tgt_engine, table_name: str) -> List[str]:
+    """
+    比對 target 既有結構與 source 應有的結構，回傳不符項目的描述清單。
+    空 list 代表相符（或其中一邊查不到欄位，無從比對）。
+    """
+    src_cols = fetch_column_defs(src_engine, table_name)
+    tgt_cols = fetch_column_defs(tgt_engine, table_name)
+    if not src_cols or not tgt_cols:
+        return []
+
+    tgt_map = {col[0]: col for col in tgt_cols}
+    issues  = []
+    for col_name, type_name, max_length, precision, scale, _ in src_cols:
+        tgt_col = tgt_map.pop(col_name, None)
+        if tgt_col is None:
+            issues.append(f"[{col_name}] target 缺少此欄位")
+            continue
+        expected = render_column_type(type_name, max_length, precision, scale, widen_ansi=True)
+        actual   = render_column_type(*tgt_col[1:5], widen_ansi=False)
+        if _comparable(expected) != _comparable(actual):
+            issues.append(f"[{col_name}] 應為 {expected}，target 實際為 {actual}")
+    for extra in tgt_map:
+        issues.append(f"[{extra}] target 多出此欄位（source 沒有）")
+    return issues
+
+
+def _report_schema_diff(src_engine, tgt_engine, table_name: str,
+                        mismatches: Optional[List[str]]) -> None:
+    """沿用 target 既有表時才呼叫——把型別不符大聲寫進 log 並彙總給呼叫端。"""
+    try:
+        issues = diff_target_schema(src_engine, tgt_engine, table_name)
+    except Exception as e:
+        logger.warning(f"  ⚠️ 無法比對 [{table_name}] 的 target 結構：{e}")
+        return
+    if not issues:
+        return
+    logger.error(f"  🚨 [{table_name}] target 結構與 source 不符，且本次不會被修正：")
+    for issue in issues:
+        logger.error(f"       - {issue}")
+    if mismatches is not None:
+        mismatches.append(f"{table_name}：" + "；".join(issues))
+
+
+def create_target_table_from_source(src_engine, tgt_engine, table_name: str,
+                                    mismatches: Optional[List[str]] = None) -> bool:
     """
     Query sys.columns on source and CREATE the table on target with correct types.
     IDENTITY constraints are intentionally omitted so we can INSERT source values directly.
+
+    退回 TRUNCATE 或 pandas 建表時，target 的結構是舊的——v1.3.0 之前的版本是交給
+    pandas 依 DataFrame dtype 推導建表的，decimal 會被建成 FLOAT，TRUNCATE 也洗不掉。
+    因此這兩條路徑都會比對並回報結構差異，不符項目 append 到 mismatches。
+
     Returns True on success, False on failure.
     """
     safe_str = table_name.replace("'", "''")
     safe_id  = table_name.replace("]", "]]")
 
-    query = f"""
-        SELECT
-            c.name,
-            tp.name AS type_name,
-            CASE
-                -- varchar/char: 放寬 2x 以容納 CP950→UTF-8 最大膨脹
-                -- 罕見字/補充字集 (U+20000+) 及 Latin-1 誤讀情境均為 2x，1.5x 不足
-                WHEN tp.name IN ('varchar','char')
-                    THEN CASE WHEN c.max_length = -1 THEN 'MAX'
-                              WHEN c.max_length * 2 > 8000 THEN 'MAX'
-                              ELSE CAST(c.max_length * 2 AS VARCHAR) END
-                WHEN tp.name IN ('varbinary','binary')
-                    THEN CASE WHEN c.max_length = -1 THEN 'MAX'
-                              ELSE CAST(c.max_length AS VARCHAR) END
-                WHEN tp.name IN ('nvarchar','nchar')
-                    THEN CASE WHEN c.max_length = -1 THEN 'MAX'
-                              ELSE CAST(c.max_length / 2 AS VARCHAR) END
-                WHEN tp.name IN ('decimal','numeric')
-                    THEN CAST(c.precision AS VARCHAR) + ',' + CAST(c.scale AS VARCHAR)
-                WHEN tp.name IN ('datetime2','datetimeoffset','time')
-                    THEN CAST(c.scale AS VARCHAR)
-                ELSE NULL
-            END AS type_params,
-            c.is_nullable
-        FROM sys.columns c
-        JOIN sys.types tp ON c.user_type_id = tp.user_type_id
-        WHERE c.object_id = OBJECT_ID('{safe_str}')
-        ORDER BY c.column_id
-    """
     try:
-        with src_engine.connect() as conn:
-            rows = conn.exec_driver_sql(query).fetchall()
+        rows = fetch_column_defs(src_engine, table_name)
         if not rows:
             logger.warning(f"  ⚠️ 無法從 source 取得 {table_name} 的欄位資訊，將由 pandas 自動建立結構")
             return False
 
         col_defs = []
-        for col_name, type_name, type_params, is_nullable in rows:
-            col_type = f"{type_name}({type_params})" if type_params else type_name
+        for col_name, type_name, max_length, precision, scale, is_nullable in rows:
+            col_type    = render_column_type(type_name, max_length, precision, scale, widen_ansi=True)
             null_clause = "NULL" if is_nullable else "NOT NULL"
-            safe_col = col_name.replace("]", "]]")
+            safe_col    = col_name.replace("]", "]]")
             col_defs.append(f"    [{safe_col}] {col_type} {null_clause}")
 
         create_ddl = f"CREATE TABLE [{safe_id}] (\n" + ",\n".join(col_defs) + "\n)"
@@ -112,11 +181,13 @@ def create_target_table_from_source(src_engine, tgt_engine, table_name: str) -> 
             logger.warning(f"  ⚠️ 無法重建 {table_name}（{drop_err}），改用 TRUNCATE 保留現有 schema")
             try:
                 with tgt_engine.begin() as conn:
-                    conn.exec_driver_sql(f"TRUNCATE TABLE [{table_name}]")
+                    conn.exec_driver_sql(f"TRUNCATE TABLE [{safe_id}]")
                 logger.info(f"  ✅ 已 TRUNCATE [{table_name}]，將複製數值")
+                _report_schema_diff(src_engine, tgt_engine, table_name, mismatches)
                 return True
             except Exception as trunc_err:
                 logger.warning(f"  ⚠️ TRUNCATE {table_name} 失敗：{trunc_err}，將由 pandas 自動建立結構")
+                _report_schema_diff(src_engine, tgt_engine, table_name, mismatches)
                 return False
 
     except Exception as e:
