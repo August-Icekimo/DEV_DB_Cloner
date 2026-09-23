@@ -1,3 +1,17 @@
+# 修正：clone 出來的資料表缺少 DEFAULT 約束 — 2026-09-23（未發佈）
+
+**fix: carry DEFAULT constraints when pre-creating target tables**
+
+> ⚠️ **在這個修正之前 clone 的資料庫都缺少 DEFAULT 約束**，需要重新 clone，或在來源端產生 `ALTER TABLE ... ADD DEFAULT ...` 手動補回 target。
+> 已知受影響：2026-09-18 clone 的 `hrm_0907`（來源 UAT 172.22.1.130/hrm_test）。
+
+- **問題**：`create_target_table_from_source` 依來源 `sys.columns` 建 target 表時只帶型別與 `NULL`/`NOT NULL`，沒帶 DEFAULT。複製本身不會出錯（每一欄都有值），但之後省略該欄、靠預設值補值的 INSERT 會失敗（Msg 515 Cannot insert the value NULL）。實例：下游 `sp_SRB1000` 寫入 `SALARY_MONTH` 未給 `bonus_no`（來源 `NOT NULL DEFAULT ('')`），寫入 `INS_PAYRECORD` 未給 `amount_self0/1`、`amount_cmp0/1`（來源 `DEFAULT ((0))`）。當次 clone 完的 target 全庫只剩 4 個 DEFAULT，卻有 1,284 個 `NOT NULL` 且無預設值的欄位。
+- **修正**：欄位查詢 LEFT JOIN `sys.default_constraints`，把 `definition` 原樣接在欄位定義後面（`[bonus_no] varchar(20) NOT NULL DEFAULT ('')`）。約束名稱交給 SQL Server 自動命名，不沿用來源名稱，避免撞到 target 上殘留物件的同名約束導致整張表建立失敗。
+- **沿用既有表時會回報**：DROP 失敗改走 TRUNCATE 時不會重建資料表，缺少的 DEFAULT 不會被補上。此時結構比對會把「source 有 DEFAULT、target 沒有（或定義不同）」寫成 ERROR log，並列入 clone 結束時的結構不符彙總，與型別不符的處理方式相同。
+- IDENTITY、PK、索引、CHECK、FK 仍不複製（IDENTITY 為刻意不帶）。
+
+---
+
 # 版本發佈 v1.3.0 (Pre) — 2026-05-22
 
 ## 模組拆分、Clone 穩定性修正與失敗 DDL Retry Script

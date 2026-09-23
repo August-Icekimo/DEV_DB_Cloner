@@ -328,12 +328,13 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
 
     if schema_mismatches:
         logger.error(
-            "\n🚨 以下資料表沿用了 target 既有結構，資料已寫入但欄位型別與 source 不符："
+            "\n🚨 以下資料表沿用了 target 既有結構，資料已寫入但欄位型別或 DEFAULT 與 source 不符："
         )
         for item in schema_mismatches:
             logger.error(f"   - {item}")
         logger.error(
-            "   （v1.3.0 之前的版本由 pandas 推導建表，decimal 會變成 FLOAT，TRUNCATE 洗不掉）\n"
+            "   （v1.3.0 之前的版本由 pandas 推導建表，decimal 會變成 FLOAT；2026-09-23 之前建的表\n"
+            "    沒有 DEFAULT 約束——兩者 TRUNCATE 都洗不掉）\n"
             "   請先排除 DROP 失敗的原因（多半是 FK 或 schema binding），"
             "手動 DROP 這些 target 資料表後重跑。\n"
         )

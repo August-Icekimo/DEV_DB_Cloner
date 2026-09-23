@@ -48,9 +48,12 @@ def fetch_all_triggers(engine) -> List[str]:
 # ---------------------------------------------------------------------------
 
 _COLUMN_QUERY = """
-    SELECT c.name, tp.name, c.max_length, c.precision, c.scale, c.is_nullable
+    SELECT c.name, tp.name, c.max_length, c.precision, c.scale, c.is_nullable,
+           dc.definition
     FROM sys.columns c
     JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+    LEFT JOIN sys.default_constraints dc
+           ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
     WHERE c.object_id = OBJECT_ID('{table}')
     ORDER BY c.column_id
 """
@@ -58,8 +61,9 @@ _COLUMN_QUERY = """
 
 def fetch_column_defs(engine, table_name: str) -> List[tuple]:
     """
-    回傳 [(name, type_name, max_length, precision, scale, is_nullable), ...]。
-    表不存在時回傳空 list。
+    回傳 [(name, type_name, max_length, precision, scale, is_nullable, default_def), ...]。
+    default_def 是 sys.default_constraints.definition 原文（已帶括號，如 '((0))'），
+    沒有 DEFAULT 時為 None。表不存在時回傳空 list。
     """
     query = _COLUMN_QUERY.format(table=table_name.replace("'", "''"))
     with engine.connect() as conn:
@@ -92,6 +96,21 @@ def render_column_type(type_name, max_length, precision, scale,
     return type_name
 
 
+def render_default_clause(default_def) -> str:
+    """
+    組出欄位定義後面的 DEFAULT 子句（含前導空白），沒有 DEFAULT 時回傳空字串。
+
+    definition 本身已帶括號，原樣使用不再包一層。約束名稱交給 SQL Server 自動命名：
+    約束名稱在 schema 內必須唯一，沿用來源名稱一旦撞到 target 殘留物件，CREATE TABLE
+    會失敗並連同 DROP 一起 rollback，整張表就退回沒有 DEFAULT 的舊結構。
+    """
+    return f" DEFAULT {default_def}" if default_def else ""
+
+
+def _comparable_default(default_def) -> str:
+    return ''.join(default_def.split()).lower() if default_def else ''
+
+
 def _comparable(type_str: str) -> str:
     """decimal 與 numeric 在 SQL Server 是同義詞，比對時視為相同。"""
     return type_str.lower().replace(' ', '').replace('numeric(', 'decimal(')
@@ -109,7 +128,7 @@ def diff_target_schema(src_engine, tgt_engine, table_name: str) -> List[str]:
 
     tgt_map = {col[0]: col for col in tgt_cols}
     issues  = []
-    for col_name, type_name, max_length, precision, scale, _ in src_cols:
+    for col_name, type_name, max_length, precision, scale, _, src_default in src_cols:
         tgt_col = tgt_map.pop(col_name, None)
         if tgt_col is None:
             issues.append(f"[{col_name}] target 缺少此欄位")
@@ -118,6 +137,12 @@ def diff_target_schema(src_engine, tgt_engine, table_name: str) -> List[str]:
         actual   = render_column_type(*tgt_col[1:5], widen_ansi=False)
         if _comparable(expected) != _comparable(actual):
             issues.append(f"[{col_name}] 應為 {expected}，target 實際為 {actual}")
+        tgt_default = tgt_col[6]
+        if src_default and _comparable_default(src_default) != _comparable_default(tgt_default):
+            if tgt_default:
+                issues.append(f"[{col_name}] DEFAULT 應為 {src_default}，target 實際為 {tgt_default}")
+            else:
+                issues.append(f"[{col_name}] target 缺少 DEFAULT {src_default}")
     for extra in tgt_map:
         issues.append(f"[{extra}] target 多出此欄位（source 沒有）")
     return issues
@@ -125,7 +150,7 @@ def diff_target_schema(src_engine, tgt_engine, table_name: str) -> List[str]:
 
 def _report_schema_diff(src_engine, tgt_engine, table_name: str,
                         mismatches: Optional[List[str]]) -> None:
-    """沿用 target 既有表時才呼叫——把型別不符大聲寫進 log 並彙總給呼叫端。"""
+    """沿用 target 既有表時才呼叫——把型別／DEFAULT 不符大聲寫進 log 並彙總給呼叫端。"""
     try:
         issues = diff_target_schema(src_engine, tgt_engine, table_name)
     except Exception as e:
@@ -140,10 +165,23 @@ def _report_schema_diff(src_engine, tgt_engine, table_name: str,
         mismatches.append(f"{table_name}：" + "；".join(issues))
 
 
+def build_create_table_ddl(table_name: str, rows: List[tuple]) -> str:
+    """依 fetch_column_defs 的結果組出 target 的 CREATE TABLE（型別 + NULL + DEFAULT）。"""
+    safe_id  = table_name.replace("]", "]]")
+    col_defs = []
+    for col_name, type_name, max_length, precision, scale, is_nullable, default_def in rows:
+        col_type    = render_column_type(type_name, max_length, precision, scale, widen_ansi=True)
+        null_clause = "NULL" if is_nullable else "NOT NULL"
+        safe_col    = col_name.replace("]", "]]")
+        col_defs.append(f"    [{safe_col}] {col_type} {null_clause}{render_default_clause(default_def)}")
+    return f"CREATE TABLE [{safe_id}] (\n" + ",\n".join(col_defs) + "\n)"
+
+
 def create_target_table_from_source(src_engine, tgt_engine, table_name: str,
                                     mismatches: Optional[List[str]] = None) -> bool:
     """
-    Query sys.columns on source and CREATE the table on target with correct types.
+    Query sys.columns on source and CREATE the table on target with correct types
+    and DEFAULT constraints.
     IDENTITY constraints are intentionally omitted so we can INSERT source values directly.
 
     退回 TRUNCATE 或 pandas 建表時，target 的結構是舊的——v1.3.0 之前的版本是交給
@@ -161,21 +199,14 @@ def create_target_table_from_source(src_engine, tgt_engine, table_name: str,
             logger.warning(f"  ⚠️ 無法從 source 取得 {table_name} 的欄位資訊，將由 pandas 自動建立結構")
             return False
 
-        col_defs = []
-        for col_name, type_name, max_length, precision, scale, is_nullable in rows:
-            col_type    = render_column_type(type_name, max_length, precision, scale, widen_ansi=True)
-            null_clause = "NULL" if is_nullable else "NOT NULL"
-            safe_col    = col_name.replace("]", "]]")
-            col_defs.append(f"    [{safe_col}] {col_type} {null_clause}")
-
-        create_ddl = f"CREATE TABLE [{safe_id}] (\n" + ",\n".join(col_defs) + "\n)"
+        create_ddl = build_create_table_ddl(table_name, rows)
         drop_ddl   = f"IF OBJECT_ID('{safe_str}', 'U') IS NOT NULL DROP TABLE [{safe_id}]"
 
         try:
             with tgt_engine.begin() as conn:
                 conn.exec_driver_sql(drop_ddl)
                 conn.exec_driver_sql(create_ddl)
-            logger.info(f"  ✅ 已依 source schema 建立 [{table_name}]（{len(col_defs)} 欄）")
+            logger.info(f"  ✅ 已依 source schema 建立 [{table_name}]（{len(rows)} 欄）")
             return True
         except Exception as drop_err:
             logger.warning(f"  ⚠️ 無法重建 {table_name}（{drop_err}），改用 TRUNCATE 保留現有 schema")
