@@ -95,6 +95,21 @@ def save_obfuscate_names(filepath=OBFUSCATE_NAME_FILE):
     except Exception as e:
         print(f"Error saving obfuscate names: {e}")
 
+def build_name_query(table_name: str, column_name: str) -> str:
+    """
+    組出撈姓名字庫的 SQL。
+
+    欄位在 source 端 CAST 成 nvarchar（與 clone_engine.build_select_list 同一策略）：
+    pymssql 內建的 FreeTDS 不看欄位 collation，varchar 一律以 Latin1 解碼，cp950 的
+    「陳婉玲」會讀成 '³¯°û¬Â'，len() 與切字都變成位元組級亂碼。LEN() 在伺服器端算，本來就對。
+    識別字來自本機設定，仍以 [..] 包起並跳脫 ]。
+    """
+    tbl = f"[{table_name.replace(']', ']]')}]"
+    col = f"[{column_name.replace(']', ']]')}]"
+    return (f"SELECT DISTINCT CAST({col} AS nvarchar(MAX)) AS {col} FROM {tbl} "
+            f"WHERE {col} IS NOT NULL AND LEN({col}) >= 2")
+
+
 def init_names_from_database(engine, table_name="EMP_DATA", column_name="emp_name"):
     """
     從資料庫指定資料表初始化姓名資料。
@@ -117,9 +132,7 @@ def init_names_from_database(engine, table_name="EMP_DATA", column_name="emp_nam
         
         with engine.connect() as conn:
             # 取得所有非空姓名
-            # SQL Injection Note: table_name/column_name should be trusted or sanitized if from web input.
-            # Here it comes from local config, assumed safe.
-            query = text(f"SELECT DISTINCT {column_name} FROM {table_name} WHERE {column_name} IS NOT NULL AND LEN({column_name}) >= 2")
+            query = text(build_name_query(table_name, column_name))
             result = conn.execute(query)
             
             count = 0
