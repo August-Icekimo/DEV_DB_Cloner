@@ -201,6 +201,98 @@ eq("collation 相符零誤報", ce.diff_target_schema(SRC_CO, FakeEngine([
 ]), 'SYS_COM_DTL'), [])
 
 
+# ---- IDENTITY ----
+# 守的是 2026-10 的 bug：建表刻意不帶 IDENTITY，target 全庫 sys.identity_columns = 0，
+# 省略 IDENTITY 欄的 INSERT 全部 Msg 515（hrm_0907 SYS_TRANS_LOG.seq_no）。
+# (…, collation, identity_seed, identity_increment)
+eq("非 IDENTITY 欄不帶子句",          ce.render_identity_clause(('id', 'int', 4, 10, 0, 0, None, None, None, None)), '')
+eq("舊格式 8 欄 tuple 視為非 IDENTITY", ce.render_identity_clause(('id', 'int', 4, 10, 0, 0, None, None)), '')
+eq("seed／increment 照抄",             ce.render_identity_clause(('id', 'int', 4, 10, 0, 0, None, None, '100', '-5')),
+   ' IDENTITY(100,-5)')
+try:
+    ce.render_identity_clause(('id', 'int', 4, 10, 0, 0, None, None, '1) x', '1'))
+    fails.append("不合法的 IDENTITY 值應該 raise")
+except ValueError:
+    pass
+
+ddl = ce.build_create_table_ddl('SYS_TRANS_LOG', [
+    ('seq_no',  'numeric', 9, 18, 0, 0, None, None, '1', '1'),
+    ('log_msg', 'varchar', 50, 0, 0, 1, None, TW_BIN, None, None),
+])
+eq("IDENTITY 接在型別後、NULL 之前", ddl.splitlines(), [
+    'CREATE TABLE [SYS_TRANS_LOG] (',
+    '    [seq_no] numeric(18,0) IDENTITY(1,1) NOT NULL,',
+    '    [log_msg] varchar(50) COLLATE Chinese_Taiwan_Stroke_BIN NULL',
+    ')',
+])
+eq("找出表上的 IDENTITY 欄", ce.identity_column([
+    ('a', 'int', 4, 10, 0, 0, None, None, None, None),
+    ('b', 'bigint', 8, 19, 0, 0, None, None, '1', '1'),
+]), 'b')
+eq("沒有 IDENTITY 欄回 None", ce.identity_column([('a', 'int', 4, 10, 0, 0, None, None)]), None)
+
+SRC_ID = FakeEngine([('seq_no', 'numeric', 9, 18, 0, 0, None, None, '1', '1')])
+eq("target 缺 IDENTITY 要回報（舊版 clone 沿用 TRUNCATE）", ce.diff_target_schema(SRC_ID, FakeEngine([
+    ('seq_no', 'numeric', 9, 18, 0, 0, None, None, None, None),
+]), 'SYS_TRANS_LOG'), ['[seq_no] target 缺少 IDENTITY(1,1)'])
+eq("seed／increment 不同要回報", ce.diff_target_schema(SRC_ID, FakeEngine([
+    ('seq_no', 'numeric', 9, 18, 0, 0, None, None, '1', '2'),
+]), 'SYS_TRANS_LOG'), ['[seq_no] 應為 IDENTITY(1,1)，target 實際為 IDENTITY(1,2)'])
+eq("target 多出 IDENTITY 要回報", ce.diff_target_schema(
+    FakeEngine([('seq_no', 'numeric', 9, 18, 0, 0, None, None, None, None)]),
+    FakeEngine([('seq_no', 'numeric', 9, 18, 0, 0, None, None, '1', '1')]), 'SYS_TRANS_LOG'),
+   ['[seq_no] target 多出 IDENTITY（source 不是 IDENTITY 欄位）'])
+eq("IDENTITY 相符零誤報", ce.diff_target_schema(SRC_ID, FakeEngine([
+    ('seq_no', 'numeric', 9, 18, 0, 0, None, None, '1', '1'),
+]), 'SYS_TRANS_LOG'), [])
+
+
+class _IdentConn(_FakeConn):
+    """記下送出的 SQL；fetch_column_defs 走 engine.connect()，同一個物件回 rows。"""
+    def __init__(self, rows, sink): self.rows, self.sink = rows, sink
+    def exec_driver_sql(self, q):
+        self.sink.append(q)
+        return self.rows
+    def commit(self):   self.sink.append('COMMIT')
+    def rollback(self): self.sink.append('ROLLBACK')
+
+class IdentEngine:
+    def __init__(self, rows): self.rows, self.sent = rows, []
+    def connect(self): return _IdentConn(self.rows, self.sent)
+
+ie = IdentEngine([('seq_no', 'numeric', 9, 18, 0, 0, None, None, '1', '1')])
+with ce.identity_insert(ie, "O'Brien") as c:
+    c.exec_driver_sql('INSERT ...')
+sent = [q for q in ie.sent if q not in ('COMMIT',) and not q.lstrip().startswith('SELECT')]
+eq("IDENTITY 表：同一條連線 ON → 寫入 → OFF → RESEED", sent, [
+    "SET IDENTITY_INSERT [O'Brien] ON",
+    'INSERT ...',
+    "SET IDENTITY_INSERT [O'Brien] OFF",
+    "DBCC CHECKIDENT (N'[O''Brien]', RESEED) WITH NO_INFOMSGS",
+])
+
+ie = IdentEngine([('seq_no', 'numeric', 9, 18, 0, 0, None, None, '1', '1')])
+try:
+    with ce.identity_insert(ie, 'T') as c:
+        raise RuntimeError('boom')
+except RuntimeError:
+    pass
+sent = [q for q in ie.sent if q != 'COMMIT' and not q.lstrip().startswith('SELECT')]
+eq("寫入失敗也要關掉 IDENTITY_INSERT，且不 RESEED", sent,
+   ['SET IDENTITY_INSERT [T] ON', 'ROLLBACK', 'SET IDENTITY_INSERT [T] OFF'])
+
+ie = IdentEngine([('seq_no', 'numeric', 9, 18, 0, 0, None, None, None, None)])
+with ce.identity_insert(ie, 'T') as c:
+    pass
+eq("target 沒有 IDENTITY（沿用舊表）時不碰 IDENTITY_INSERT",
+   [q for q in ie.sent if 'IDENTITY' in q or 'CHECKIDENT' in q], [])
+
+src = __import__('inspect').getsource(dr._execute_replication)
+eq("to_sql 必須寫到 identity_insert 的連線，不可傳 engine",
+   ('identity_insert(target_engine, table) as tgt_conn' in src, 'to_sql(table, tgt_conn' in src,
+    'to_sql(table, target_engine' in src), (True, True, False))
+
+
 # ---- 讀取端：ANSI 字串在 source 端 CAST 成 nvarchar ----
 # 守的是 2026-10 實測確認的 bug：pymssql 內建 FreeTDS 不看欄位 collation，varchar 一律
 # Latin1 解碼，cp950「陳婉玲」讀成 '³¯°û¬Â'；target 改中文 collation 後會被轉成亂碼。
