@@ -6,6 +6,7 @@ import re
 import os
 import urllib.parse
 import logging
+from contextlib import contextmanager
 from datetime import datetime
 from typing import List, Dict, Optional
 
@@ -49,11 +50,14 @@ def fetch_all_triggers(engine) -> List[str]:
 
 _COLUMN_QUERY = """
     SELECT c.name, tp.name, c.max_length, c.precision, c.scale, c.is_nullable,
-           dc.definition, c.collation_name
+           dc.definition, c.collation_name,
+           CAST(ic.seed_value AS nvarchar(40)), CAST(ic.increment_value AS nvarchar(40))
     FROM sys.columns c
     JOIN sys.types tp ON c.user_type_id = tp.user_type_id
     LEFT JOIN sys.default_constraints dc
            ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+    LEFT JOIN sys.identity_columns ic
+           ON ic.object_id = c.object_id AND ic.column_id = c.column_id
     WHERE c.object_id = OBJECT_ID('{table}')
     ORDER BY c.column_id
 """
@@ -61,9 +65,12 @@ _COLUMN_QUERY = """
 
 def fetch_column_defs(engine, table_name: str) -> List[tuple]:
     """
-    回傳 [(name, type_name, max_length, precision, scale, is_nullable, default_def, collation), ...]。
+    回傳 [(name, type_name, max_length, precision, scale, is_nullable, default_def, collation,
+           identity_seed, identity_increment), ...]。
     default_def 是 sys.default_constraints.definition 原文（已帶括號，如 '((0))'），
     沒有 DEFAULT 時為 None。collation 是 sys.columns.collation_name，非字串欄位為 None。
+    identity_seed／identity_increment 是 sys.identity_columns 的值轉成的整數字串
+    （原型別是 sql_variant，pymssql 讀不好），非 IDENTITY 欄位兩者皆為 None。
     表不存在時回傳空 list。
     """
     query = _COLUMN_QUERY.format(table=table_name.replace("'", "''"))
@@ -152,6 +159,43 @@ def render_collate_clause(type_name, collation) -> str:
     return f" COLLATE {collation}"
 
 
+_IDENTITY_VALUE = re.compile(r'^-?\d+$')
+
+
+def column_identity(row) -> Optional[tuple]:
+    """
+    取出欄位的 (seed, increment)，非 IDENTITY 欄位回傳 None。
+    舊格式的 8 欄 tuple（沒有 identity 資訊）一律視為非 IDENTITY。
+    """
+    seed, incr = (tuple(row[8:10]) + (None, None))[:2]
+    if seed is None or incr is None:
+        return None
+    seed, incr = str(seed).strip(), str(incr).strip()
+    if not (_IDENTITY_VALUE.match(seed) and _IDENTITY_VALUE.match(incr)):
+        raise ValueError(f"不合法的 IDENTITY 值：({seed!r}, {incr!r})")
+    return seed, incr
+
+
+def render_identity_clause(row) -> str:
+    """
+    組出欄位型別後面的 IDENTITY 子句（含前導空白），非 IDENTITY 欄位回傳空字串。
+
+    v1.3.x 刻意不帶 IDENTITY 以便直接 INSERT 來源值，結果 target 全庫沒有任何 IDENTITY，
+    之後省略該欄的 INSERT 全部 Msg 515（2026-10 hrm_0907 SYS_TRANS_LOG.seq_no）。
+    現在照帶，搬資料時改以 SET IDENTITY_INSERT ON 寫入來源值。
+    """
+    ident = column_identity(row)
+    return f" IDENTITY({ident[0]},{ident[1]})" if ident else ""
+
+
+def identity_column(rows: List[tuple]) -> Optional[str]:
+    """回傳表上的 IDENTITY 欄位名稱（SQL Server 每張表最多一個），沒有時回傳 None。"""
+    for row in rows:
+        if column_identity(row):
+            return row[0]
+    return None
+
+
 def _comparable_default(default_def) -> str:
     return ''.join(default_def.split()).lower() if default_def else ''
 
@@ -173,7 +217,8 @@ def diff_target_schema(src_engine, tgt_engine, table_name: str) -> List[str]:
 
     tgt_map = {col[0]: col for col in tgt_cols}
     issues  = []
-    for col_name, type_name, max_length, precision, scale, _, src_default, src_coll in src_cols:
+    for src_col in src_cols:
+        col_name, type_name, max_length, precision, scale, _, src_default, src_coll = src_col[:8]
         tgt_col = tgt_map.pop(col_name, None)
         if tgt_col is None:
             issues.append(f"[{col_name}] target 缺少此欄位")
@@ -191,6 +236,15 @@ def diff_target_schema(src_engine, tgt_engine, table_name: str) -> List[str]:
         tgt_coll = tgt_col[7]
         if src_coll and (tgt_coll or '').lower() != src_coll.lower():
             issues.append(f"[{col_name}] COLLATE 應為 {src_coll}，target 實際為 {tgt_coll}")
+        src_ident, tgt_ident = column_identity(src_col), column_identity(tgt_col)
+        if src_ident != tgt_ident:
+            if not tgt_ident:
+                issues.append(f"[{col_name}] target 缺少 IDENTITY({src_ident[0]},{src_ident[1]})")
+            elif not src_ident:
+                issues.append(f"[{col_name}] target 多出 IDENTITY（source 不是 IDENTITY 欄位）")
+            else:
+                issues.append(f"[{col_name}] 應為 IDENTITY({src_ident[0]},{src_ident[1]})，"
+                              f"target 實際為 IDENTITY({tgt_ident[0]},{tgt_ident[1]})")
     for extra in tgt_map:
         issues.append(f"[{extra}] target 多出此欄位（source 沒有）")
     return issues
@@ -198,7 +252,7 @@ def diff_target_schema(src_engine, tgt_engine, table_name: str) -> List[str]:
 
 def _report_schema_diff(src_engine, tgt_engine, table_name: str,
                         mismatches: Optional[List[str]]) -> None:
-    """沿用 target 既有表時才呼叫——把型別／DEFAULT／COLLATE 不符大聲寫進 log 並彙總給呼叫端。"""
+    """沿用 target 既有表時才呼叫——把型別／DEFAULT／COLLATE／IDENTITY 不符大聲寫進 log 並彙總給呼叫端。"""
     try:
         issues = diff_target_schema(src_engine, tgt_engine, table_name)
     except Exception as e:
@@ -214,12 +268,14 @@ def _report_schema_diff(src_engine, tgt_engine, table_name: str,
 
 
 def build_create_table_ddl(table_name: str, rows: List[tuple]) -> str:
-    """依 fetch_column_defs 的結果組出 target 的 CREATE TABLE（型別 + COLLATE + NULL + DEFAULT）。"""
+    """依 fetch_column_defs 的結果組出 target 的 CREATE TABLE（型別 + COLLATE + IDENTITY + NULL + DEFAULT）。"""
     safe_id  = table_name.replace("]", "]]")
     col_defs = []
-    for col_name, type_name, max_length, precision, scale, is_nullable, default_def, collation in rows:
+    for row in rows:
+        col_name, type_name, max_length, precision, scale, is_nullable, default_def, collation = row[:8]
         col_type    = render_column_type(type_name, max_length, precision, scale)
         col_type   += render_collate_clause(type_name, collation)
+        col_type   += render_identity_clause(row)
         null_clause = "NULL" if is_nullable else "NOT NULL"
         safe_col    = col_name.replace("]", "]]")
         col_defs.append(f"    [{safe_col}] {col_type} {null_clause}{render_default_clause(default_def)}")
@@ -230,8 +286,8 @@ def create_target_table_from_source(src_engine, tgt_engine, table_name: str,
                                     mismatches: Optional[List[str]] = None) -> bool:
     """
     Query sys.columns on source and CREATE the table on target with correct types,
-    column collations and DEFAULT constraints.
-    IDENTITY constraints are intentionally omitted so we can INSERT source values directly.
+    column collations, IDENTITY(seed, increment) and DEFAULT constraints.
+    IDENTITY 欄位的來源值由呼叫端以 identity_insert() 包住寫入。
 
     退回 TRUNCATE 或 pandas 建表時，target 的結構是舊的——v1.3.0 之前的版本是交給
     pandas 依 DataFrame dtype 推導建表的，decimal 會被建成 FLOAT，TRUNCATE 也洗不掉。
@@ -273,6 +329,48 @@ def create_target_table_from_source(src_engine, tgt_engine, table_name: str,
     except Exception as e:
         logger.warning(f"  ⚠️ 預建 {table_name} schema 失敗：{e}，將由 pandas 自動建立結構")
         return False
+
+
+def _identity_target_name(table_name: str) -> str:
+    """DBCC CHECKIDENT 的表名參數是字串常值，[..] 包起後再跳脫單引號。"""
+    return "[" + table_name.replace("]", "]]") + "]"
+
+
+@contextmanager
+def identity_insert(engine, table_name: str):
+    """
+    提供一條寫入 target 用的 Connection；表上有 IDENTITY 欄位時，期間 IDENTITY_INSERT 為 ON。
+
+    IDENTITY_INSERT 是 session 層級設定，一定要跟 pandas to_sql 用同一條連線——交給 engine
+    的話 pandas 會從 pool 另拿一條，設定不在那條上，INSERT 會 Msg 544。設定不受 COMMIT
+    影響，所以呼叫端可以每個 chunk commit 一次，不必整張表包成一個大交易。
+    結束時關掉 IDENTITY_INSERT（同一 session 只能有一張表是 ON），再 DBCC CHECKIDENT RESEED，
+    讓之後省略該欄的 INSERT 從已複製資料的最大值往後編號。
+
+    是否 ON 依 target 實際結構判斷：沿用舊表（TRUNCATE 路徑）時 target 可能沒有 IDENTITY，
+    此時對它 SET IDENTITY_INSERT 會直接失敗。
+    """
+    with engine.connect() as conn:
+        tgt_ident = identity_column(fetch_column_defs(engine, table_name))
+        target    = _identity_target_name(table_name)
+        if tgt_ident:
+            conn.exec_driver_sql(f"SET IDENTITY_INSERT {target} ON")
+            conn.commit()
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            if tgt_ident:
+                conn.exec_driver_sql(f"SET IDENTITY_INSERT {target} OFF")
+                conn.commit()
+        if tgt_ident:
+            safe_lit = target.replace("'", "''")
+            conn.exec_driver_sql(f"DBCC CHECKIDENT (N'{safe_lit}', RESEED) WITH NO_INFOMSGS")
+            conn.commit()
+            logger.info(f"  ✅ [{table_name}].[{tgt_ident}] IDENTITY 已 RESEED，之後的自動編號接續已複製的資料")
 
 
 _COLLATION_QUERY = """

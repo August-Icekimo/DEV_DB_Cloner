@@ -1,3 +1,19 @@
+# 修正：clone 出來的資料表沒有 IDENTITY — 2026-10-21（未發佈）
+
+**fix: keep IDENTITY(seed, increment) on cloned tables; copy source values with IDENTITY_INSERT**
+
+> ⚠️ **在這個修正之前 clone 的資料庫都沒有任何 IDENTITY 欄位**（`sys.identity_columns` 為 0），省略 IDENTITY 欄的 INSERT 會 Msg 515。要重新 clone，或在來源端執行 `gen_identity_sequences.sql`，把產出的 SEQUENCE + DEFAULT 套到 target。
+> 已知受影響：`hrm_0907`（來源 UAT 172.22.1.130/hrm_test）。`SYS_TRANS_LOG.seq_no` 已手動補上 `dbo.SEQ_SYS_TRANS_LOG`，產生器會略過它。
+
+- **問題**：`create_target_table_from_source` 刻意不帶 IDENTITY，好讓來源值能直接 INSERT。複製本身不會出錯，但之後省略該欄、靠自動編號的 INSERT 全部失敗。實例：HRM 的 MSDB／SysDbLog 寫 `SYS_TRANS_LOG` 時不給 `seq_no`（來源是 `numeric(18,0) IDENTITY`），`hrm_0907` 自 clone 後所有交易 log 都沒寫進去，而且錯誤沒有浮出來。
+- **建表**：欄位查詢 LEFT JOIN `sys.identity_columns`，`seed_value`／`increment_value` 在 source 端轉成字串，避免 pymssql 讀 sql_variant 出問題。建表時寫出 `IDENTITY(seed,increment)`，接在型別後面（`[seq_no] numeric(18,0) IDENTITY(1,1) NOT NULL`）。
+- **搬資料**：表上有 IDENTITY 時，`SET IDENTITY_INSERT [t] ON` 與 pandas `to_sql` 必須用**同一條連線**。這個設定是 session 層級的，把 engine 交給 pandas 會從 pool 另拿一條連線，INSERT 就會 Msg 544。設定不受 COMMIT 影響，所以照舊每個 chunk commit 一次，不會把整張表包成一個大交易。結束時（含失敗）一定會 `OFF`，成功後再 `DBCC CHECKIDENT (..., RESEED)`，讓之後的自動編號從已複製資料的最大值往後接。套用篩選條件只複製部分資料時，也是從複製進來的最大值往後接。
+- **沿用既有表時會回報**：DROP 失敗改走 TRUNCATE 時，是否開 IDENTITY_INSERT 依 **target 實際結構**判斷（舊表沒有 IDENTITY，硬開會失敗），資料照常寫入。結構比對會把「target 缺少 IDENTITY」、「seed／increment 不同」、「target 多出 IDENTITY」寫進 ERROR log 與結束時的彙總。
+- **既有測試庫的補救：`gen_identity_sequences.sql`**：既有欄位無法事後 ALTER 成 IDENTITY，所以改用 SEQUENCE + `DEFAULT (NEXT VALUE FOR ...)` 做到「省略欄位時自動編號」。HRM 程式沒有用 `SCOPE_IDENTITY`／`@@IDENTITY`／`IDENT_CURRENT`，這樣就夠了。用法、可重複執行的規則與 `gen_default_constraints.sql` 相同：在來源執行，輸出套到 target。每個來源 IDENTITY 欄位會建 `<schema>.SEQ_<table>`，START 在 target 執行當下以 `ISNULL(MAX(col), seed - increment) + increment` 計算（increment 為負時用 MIN），再加上 `DF_<table>_<col>`。target 該欄已有 DEFAULT 或已是 IDENTITY 就略過。
+- PK、索引、CHECK、FK 仍不複製。
+
+---
+
 # 修正：clone 出來的資料庫與欄位 collation 變成容器預設值 — 2026-10-20（未發佈）
 
 **fix: preserve source collation on cloned tables; abort on database collation mismatch**
@@ -27,7 +43,7 @@
 - **問題**：`create_target_table_from_source` 依來源 `sys.columns` 建 target 表時只帶型別與 `NULL`/`NOT NULL`，沒帶 DEFAULT。複製本身不會出錯（每一欄都有值），但之後省略該欄、靠預設值補值的 INSERT 會失敗（Msg 515 Cannot insert the value NULL）。實例：下游 `sp_SRB1000` 寫入 `SALARY_MONTH` 未給 `bonus_no`（來源 `NOT NULL DEFAULT ('')`），寫入 `INS_PAYRECORD` 未給 `amount_self0/1`、`amount_cmp0/1`（來源 `DEFAULT ((0))`）。當次 clone 完的 target 全庫只剩 4 個 DEFAULT，卻有 1,284 個 `NOT NULL` 且無預設值的欄位。
 - **修正**：欄位查詢 LEFT JOIN `sys.default_constraints`，把 `definition` 原樣接在欄位定義後面（`[bonus_no] varchar(20) NOT NULL DEFAULT ('')`）。約束名稱交給 SQL Server 自動命名，不沿用來源名稱，避免撞到 target 上殘留物件的同名約束導致整張表建立失敗。
 - **沿用既有表時會回報**：DROP 失敗改走 TRUNCATE 時不會重建資料表，缺少的 DEFAULT 不會被補上。此時結構比對會把「source 有 DEFAULT、target 沒有（或定義不同）」寫成 ERROR log，並列入 clone 結束時的結構不符彙總，與型別不符的處理方式相同。
-- IDENTITY、PK、索引、CHECK、FK 仍不複製（IDENTITY 為刻意不帶）。
+- IDENTITY、PK、索引、CHECK、FK 仍不複製（IDENTITY 為刻意不帶；2026-10-21 起改為照帶）。
 
 ---
 
