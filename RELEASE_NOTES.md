@@ -1,3 +1,36 @@
+# 修正：clone 出來的資料庫與欄位 collation 變成容器預設值 — 2026-10-20（未發佈）
+
+**fix: preserve source collation on cloned tables; abort on database collation mismatch**
+
+> ⚠️ **在這個修正之前 clone 的資料表，字串欄位都是 target 資料庫的預設 collation**（容器上是 `SQL_Latin1_General_CP1_CI_AS`）。要以來源 collation 重建資料庫後重新 clone。
+> 已知受影響：`hrm_0805`、`hrm_0907`（來源 UAT 172.22.1.130/hrm_test）。
+
+- **問題**：整個工具都沒處理 collation，target 資料庫與欄位都套用了容器 SQL Server 的預設值。後果是 SP 裡沒加 `N` 前綴的中文常值變成 `???`，varchar 中文也無法正確落地或顯示。
+- **欄位**：欄位查詢加帶 `sys.columns.collation_name`，建表時字串欄位（char/varchar/text/nchar/nvarchar/ntext）寫出 `COLLATE <來源欄位 collation>`，接在型別後面（`[main_code] varchar(20) COLLATE Chinese_Taiwan_Stroke_CI_AS NOT NULL`）。逐欄沿用來源的值，所以跟來源資料庫預設不同的欄位也會保留。
+- **資料庫**：本工具不建立 target 資料庫。開始複製前會比對 source／target 的 `DATABASEPROPERTYEX(DB_NAME(),'Collation')`，不一致就中止，並提示 `CREATE DATABASE ... COLLATE ...`。可加 `--allow-collation-mismatch` 強制繼續。target 伺服器預設 collation（也就是 tempdb 的）與 source 不同時只發出警告。
+- **沿用既有表時會回報**：DROP 失敗改走 TRUNCATE 時，欄位 collation 不同會跟型別、DEFAULT 不符一樣寫進 ERROR log 與結束時的彙總。
+- **讀取端（實測確認的根因）**：pymssql 2.3.13 內建的 FreeTDS v1.4.27 不看欄位 collation，varchar 一律以 Latin1 解碼——cp950 的「陳婉玲」(`0xB3AFB0FBACC2`) 讀成 `'³¯°û¬Â'`（TDS 7.4；改 `tds_version` 7.0／7.3 結果相同；`charset='CP950'` 能讀對 varchar，卻會讓 nvarchar 讀成空字串）。舊版 target 欄位是 Latin1，以 `N''` 寫回剛好還原同樣位元組，所以 `hrm_0907` 的位元組是對的、顯示是錯的；但 target 改成中文 collation 後會被轉成亂碼（`0x33A1C2A258753F41`），**只改 COLLATE 會讓資料更糟**。修正：搬資料的 SELECT 把 char／varchar／text 在 source 端 `CAST(... AS nvarchar(n|MAX))`，交給 SQL Server 依來源 collation 轉成 Unicode，寫入時以 `N'...'` 送出、由 target 欄位 collation 轉回 code page。
+- **實測（本機容器，假資料）**：source `Chinese_Taiwan_Stroke_BIN`，varchar／char／text／varchar(max)（含「許功蓋」等 0x5C 尾碼字）、Latin1 collation 欄位（café）、nvarchar、decimal。新版 clone 到 BIN 與 Latin1 預設的 target，位元組與 Unicode 讀值全部與 source 一致；模擬舊版（不帶 COLLATE、`SELECT *`）完全重現 `hrm_0907` 的現象。
+- **姓名字庫（DB 模式）同樣修正**：`init_names_from_database` 原本直接 `SELECT DISTINCT {column}`，來源欄位是 varchar 時讀到 Latin1 亂碼。3 字姓名讀成 6 個字元，被長度判斷丟棄；2 字姓名讀成 4 個字元，被當複姓切成亂碼，字庫因此壞掉。預設的 `EMP_DATA.emp_name` 是 nvarchar，不受影響。改成在 source 端 `CAST(... AS nvarchar(MAX))`，識別字以 `[..]` 包起並跳脫 `]`。容器實測（varchar 假資料）：「陳婉玲」切成「陳」+「婉玲」，「歐陽小華」切成「歐陽」+「小華」。盤點其餘讀取 source 的地方（TUI 連線測試、物件清單、`OBJECT_DEFINITION`、`sys.sql_modules.definition`、相依性查詢），都只讀 metadata 或 nvarchar，不需要改。
+- **取消 varchar/char 長度 2x 放寬**：v1.3.0 為了 CP950→UTF-8 膨脹把 varchar/char 長度乘 2，但膨脹其實是讀取端 Latin1 誤讀造成的。讀取端修好、collation 也一致之後，位元組數不會改變，長度改為照抄來源。放寬會把 char(10) 建成 char(20) 並多補空白，`DATALENGTH` 與來源不同。沿用舊表（TRUNCATE 路徑）時，舊版放寬過的欄位會列入結構不符彙總。
+- **連帶影響**：varchar 欄位的去敏化函式以前收到的是 Latin1 亂碼，現在會收到正確中文，產出結果可能與舊版不同。
+
+---
+
+# 修正：clone 出來的資料表缺少 DEFAULT 約束 — 2026-09-23（未發佈）
+
+**fix: carry DEFAULT constraints when pre-creating target tables**
+
+> ⚠️ **在這個修正之前 clone 的資料庫都缺少 DEFAULT 約束**，需要重新 clone，或在來源端產生 `ALTER TABLE ... ADD DEFAULT ...` 手動補回 target。
+> 已知受影響：2026-09-18 clone 的 `hrm_0907`（來源 UAT 172.22.1.130/hrm_test）。
+
+- **問題**：`create_target_table_from_source` 依來源 `sys.columns` 建 target 表時只帶型別與 `NULL`/`NOT NULL`，沒帶 DEFAULT。複製本身不會出錯（每一欄都有值），但之後省略該欄、靠預設值補值的 INSERT 會失敗（Msg 515 Cannot insert the value NULL）。實例：下游 `sp_SRB1000` 寫入 `SALARY_MONTH` 未給 `bonus_no`（來源 `NOT NULL DEFAULT ('')`），寫入 `INS_PAYRECORD` 未給 `amount_self0/1`、`amount_cmp0/1`（來源 `DEFAULT ((0))`）。當次 clone 完的 target 全庫只剩 4 個 DEFAULT，卻有 1,284 個 `NOT NULL` 且無預設值的欄位。
+- **修正**：欄位查詢 LEFT JOIN `sys.default_constraints`，把 `definition` 原樣接在欄位定義後面（`[bonus_no] varchar(20) NOT NULL DEFAULT ('')`）。約束名稱交給 SQL Server 自動命名，不沿用來源名稱，避免撞到 target 上殘留物件的同名約束導致整張表建立失敗。
+- **沿用既有表時會回報**：DROP 失敗改走 TRUNCATE 時不會重建資料表，缺少的 DEFAULT 不會被補上。此時結構比對會把「source 有 DEFAULT、target 沒有（或定義不同）」寫成 ERROR log，並列入 clone 結束時的結構不符彙總，與型別不符的處理方式相同。
+- IDENTITY、PK、索引、CHECK、FK 仍不複製（IDENTITY 為刻意不帶）。
+
+---
+
 # 版本發佈 v1.3.0 (Pre) — 2026-05-22
 
 ## 模組拆分、Clone 穩定性修正與失敗 DDL Retry Script

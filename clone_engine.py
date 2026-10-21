@@ -7,7 +7,7 @@ import os
 import urllib.parse
 import logging
 from datetime import datetime
-from typing import List, Dict
+from typing import List, Dict, Optional
 
 from sqlalchemy import create_engine, inspect
 
@@ -47,81 +47,276 @@ def fetch_all_triggers(engine) -> List[str]:
 # Table schema creation
 # ---------------------------------------------------------------------------
 
-def create_target_table_from_source(src_engine, tgt_engine, table_name: str) -> bool:
+_COLUMN_QUERY = """
+    SELECT c.name, tp.name, c.max_length, c.precision, c.scale, c.is_nullable,
+           dc.definition, c.collation_name
+    FROM sys.columns c
+    JOIN sys.types tp ON c.user_type_id = tp.user_type_id
+    LEFT JOIN sys.default_constraints dc
+           ON dc.parent_object_id = c.object_id AND dc.parent_column_id = c.column_id
+    WHERE c.object_id = OBJECT_ID('{table}')
+    ORDER BY c.column_id
+"""
+
+
+def fetch_column_defs(engine, table_name: str) -> List[tuple]:
     """
-    Query sys.columns on source and CREATE the table on target with correct types.
+    回傳 [(name, type_name, max_length, precision, scale, is_nullable, default_def, collation), ...]。
+    default_def 是 sys.default_constraints.definition 原文（已帶括號，如 '((0))'），
+    沒有 DEFAULT 時為 None。collation 是 sys.columns.collation_name，非字串欄位為 None。
+    表不存在時回傳空 list。
+    """
+    query = _COLUMN_QUERY.format(table=table_name.replace("'", "''"))
+    with engine.connect() as conn:
+        return [tuple(row) for row in conn.exec_driver_sql(query)]
+
+
+def render_column_type(type_name, max_length, precision, scale) -> str:
+    """
+    把 sys.columns 的原始欄位資訊組成 T-SQL 型別字串。
+
+    varchar/char 長度照抄來源，不放寬：讀取端已在來源 CAST 成 nvarchar，target 欄位
+    又沿用來源 collation，寫回去的位元組數與來源相同。舊版放寬 2x 會把 char(10)
+    建成 char(20)，值被多補空白。
+    """
+    t = type_name.lower()
+    if t in ('varchar', 'char'):
+        if max_length == -1:
+            return f"{type_name}(MAX)"
+        return f"{type_name}({max_length})"
+    if t in ('varbinary', 'binary'):
+        return f"{type_name}(MAX)" if max_length == -1 else f"{type_name}({max_length})"
+    if t in ('nvarchar', 'nchar'):
+        return f"{type_name}(MAX)" if max_length == -1 else f"{type_name}({max_length // 2})"
+    if t in ('decimal', 'numeric'):
+        return f"{type_name}({precision},{scale})"
+    if t in ('datetime2', 'datetimeoffset', 'time'):
+        return f"{type_name}({scale})"
+    return type_name
+
+
+_ANSI_TEXT_TYPES = {'char', 'varchar', 'text'}
+
+
+def build_select_list(rows: List[tuple]) -> str:
+    """
+    組出搬資料用的 SELECT 欄位清單：char／varchar／text 在 source 端 CAST 成 nvarchar。
+
+    pymssql wheel 內建的 FreeTDS 不看欄位 collation，varchar 一律以 Latin1 解碼——
+    cp950 的「陳婉玲」(0xB3AFB0FBACC2) 會讀成 '³¯°û¬Â'。target 是 Latin1 時以 N'' 寫回
+    剛好還原同樣位元組（hrm_0907 的現象），target 是中文 collation 時就被轉成亂碼。
+    改 tds_version 無效，charset='CP950' 又會讓 nvarchar 讀成空字串；交給 SQL Server 依
+    來源 collation 轉成 nvarchar，就完全不經過驅動程式的編碼處理。
+    欄位別名維持原名，篩選條件裡的 ORDER BY 照常可用。沒有欄位資訊時退回 *。
+    """
+    if not rows:
+        return "*"
+    cols = []
+    for col_name, type_name, max_length, *_ in rows:
+        safe_col = f"[{col_name.replace(']', ']]')}]"
+        if type_name.lower() in _ANSI_TEXT_TYPES:
+            size = "MAX" if max_length == -1 or max_length > 4000 or type_name.lower() == 'text' else max_length
+            cols.append(f"CAST({safe_col} AS nvarchar({size})) AS {safe_col}")
+        else:
+            cols.append(safe_col)
+    return ", ".join(cols)
+
+
+def render_default_clause(default_def) -> str:
+    """
+    組出欄位定義後面的 DEFAULT 子句（含前導空白），沒有 DEFAULT 時回傳空字串。
+
+    definition 本身已帶括號，原樣使用不再包一層。約束名稱交給 SQL Server 自動命名：
+    約束名稱在 schema 內必須唯一，沿用來源名稱一旦撞到 target 殘留物件，CREATE TABLE
+    會失敗並連同 DROP 一起 rollback，整張表就退回沒有 DEFAULT 的舊結構。
+    """
+    return f" DEFAULT {default_def}" if default_def else ""
+
+
+_COLLATABLE_TYPES = {'char', 'varchar', 'text', 'nchar', 'nvarchar', 'ntext'}
+_COLLATION_NAME   = re.compile(r'^\w+$')
+
+
+def render_collate_clause(type_name, collation) -> str:
+    """
+    組出字串欄位型別後面的 COLLATE 子句（含前導空白），其餘情況回傳空字串。
+
+    一定要逐欄寫出來源的 collation：不寫就套用 target 資料庫預設值，而測試容器的預設是
+    SQL_Latin1_General_CP1_CI_AS——varchar 中文會變 ???，或 Big5 位元組被當 Latin1 解讀。
+    collation 名稱直接拼進 DDL，只接受識別字字元。
+    """
+    if not collation or type_name.lower() not in _COLLATABLE_TYPES:
+        return ""
+    if not _COLLATION_NAME.match(collation):
+        raise ValueError(f"不合法的 collation 名稱：{collation!r}")
+    return f" COLLATE {collation}"
+
+
+def _comparable_default(default_def) -> str:
+    return ''.join(default_def.split()).lower() if default_def else ''
+
+
+def _comparable(type_str: str) -> str:
+    """decimal 與 numeric 在 SQL Server 是同義詞，比對時視為相同。"""
+    return type_str.lower().replace(' ', '').replace('numeric(', 'decimal(')
+
+
+def diff_target_schema(src_engine, tgt_engine, table_name: str) -> List[str]:
+    """
+    比對 target 既有結構與 source 應有的結構，回傳不符項目的描述清單。
+    空 list 代表相符（或其中一邊查不到欄位，無從比對）。
+    """
+    src_cols = fetch_column_defs(src_engine, table_name)
+    tgt_cols = fetch_column_defs(tgt_engine, table_name)
+    if not src_cols or not tgt_cols:
+        return []
+
+    tgt_map = {col[0]: col for col in tgt_cols}
+    issues  = []
+    for col_name, type_name, max_length, precision, scale, _, src_default, src_coll in src_cols:
+        tgt_col = tgt_map.pop(col_name, None)
+        if tgt_col is None:
+            issues.append(f"[{col_name}] target 缺少此欄位")
+            continue
+        expected = render_column_type(type_name, max_length, precision, scale)
+        actual   = render_column_type(*tgt_col[1:5])
+        if _comparable(expected) != _comparable(actual):
+            issues.append(f"[{col_name}] 應為 {expected}，target 實際為 {actual}")
+        tgt_default = tgt_col[6]
+        if src_default and _comparable_default(src_default) != _comparable_default(tgt_default):
+            if tgt_default:
+                issues.append(f"[{col_name}] DEFAULT 應為 {src_default}，target 實際為 {tgt_default}")
+            else:
+                issues.append(f"[{col_name}] target 缺少 DEFAULT {src_default}")
+        tgt_coll = tgt_col[7]
+        if src_coll and (tgt_coll or '').lower() != src_coll.lower():
+            issues.append(f"[{col_name}] COLLATE 應為 {src_coll}，target 實際為 {tgt_coll}")
+    for extra in tgt_map:
+        issues.append(f"[{extra}] target 多出此欄位（source 沒有）")
+    return issues
+
+
+def _report_schema_diff(src_engine, tgt_engine, table_name: str,
+                        mismatches: Optional[List[str]]) -> None:
+    """沿用 target 既有表時才呼叫——把型別／DEFAULT／COLLATE 不符大聲寫進 log 並彙總給呼叫端。"""
+    try:
+        issues = diff_target_schema(src_engine, tgt_engine, table_name)
+    except Exception as e:
+        logger.warning(f"  ⚠️ 無法比對 [{table_name}] 的 target 結構：{e}")
+        return
+    if not issues:
+        return
+    logger.error(f"  🚨 [{table_name}] target 結構與 source 不符，且本次不會被修正：")
+    for issue in issues:
+        logger.error(f"       - {issue}")
+    if mismatches is not None:
+        mismatches.append(f"{table_name}：" + "；".join(issues))
+
+
+def build_create_table_ddl(table_name: str, rows: List[tuple]) -> str:
+    """依 fetch_column_defs 的結果組出 target 的 CREATE TABLE（型別 + COLLATE + NULL + DEFAULT）。"""
+    safe_id  = table_name.replace("]", "]]")
+    col_defs = []
+    for col_name, type_name, max_length, precision, scale, is_nullable, default_def, collation in rows:
+        col_type    = render_column_type(type_name, max_length, precision, scale)
+        col_type   += render_collate_clause(type_name, collation)
+        null_clause = "NULL" if is_nullable else "NOT NULL"
+        safe_col    = col_name.replace("]", "]]")
+        col_defs.append(f"    [{safe_col}] {col_type} {null_clause}{render_default_clause(default_def)}")
+    return f"CREATE TABLE [{safe_id}] (\n" + ",\n".join(col_defs) + "\n)"
+
+
+def create_target_table_from_source(src_engine, tgt_engine, table_name: str,
+                                    mismatches: Optional[List[str]] = None) -> bool:
+    """
+    Query sys.columns on source and CREATE the table on target with correct types,
+    column collations and DEFAULT constraints.
     IDENTITY constraints are intentionally omitted so we can INSERT source values directly.
+
+    退回 TRUNCATE 或 pandas 建表時，target 的結構是舊的——v1.3.0 之前的版本是交給
+    pandas 依 DataFrame dtype 推導建表的，decimal 會被建成 FLOAT，TRUNCATE 也洗不掉。
+    因此這兩條路徑都會比對並回報結構差異，不符項目 append 到 mismatches。
+
     Returns True on success, False on failure.
     """
     safe_str = table_name.replace("'", "''")
     safe_id  = table_name.replace("]", "]]")
 
-    query = f"""
-        SELECT
-            c.name,
-            tp.name AS type_name,
-            CASE
-                -- varchar/char: 放寬 2x 以容納 CP950→UTF-8 最大膨脹
-                -- 罕見字/補充字集 (U+20000+) 及 Latin-1 誤讀情境均為 2x，1.5x 不足
-                WHEN tp.name IN ('varchar','char')
-                    THEN CASE WHEN c.max_length = -1 THEN 'MAX'
-                              WHEN c.max_length * 2 > 8000 THEN 'MAX'
-                              ELSE CAST(c.max_length * 2 AS VARCHAR) END
-                WHEN tp.name IN ('varbinary','binary')
-                    THEN CASE WHEN c.max_length = -1 THEN 'MAX'
-                              ELSE CAST(c.max_length AS VARCHAR) END
-                WHEN tp.name IN ('nvarchar','nchar')
-                    THEN CASE WHEN c.max_length = -1 THEN 'MAX'
-                              ELSE CAST(c.max_length / 2 AS VARCHAR) END
-                WHEN tp.name IN ('decimal','numeric')
-                    THEN CAST(c.precision AS VARCHAR) + ',' + CAST(c.scale AS VARCHAR)
-                WHEN tp.name IN ('datetime2','datetimeoffset','time')
-                    THEN CAST(c.scale AS VARCHAR)
-                ELSE NULL
-            END AS type_params,
-            c.is_nullable
-        FROM sys.columns c
-        JOIN sys.types tp ON c.user_type_id = tp.user_type_id
-        WHERE c.object_id = OBJECT_ID('{safe_str}')
-        ORDER BY c.column_id
-    """
     try:
-        with src_engine.connect() as conn:
-            rows = conn.exec_driver_sql(query).fetchall()
+        rows = fetch_column_defs(src_engine, table_name)
         if not rows:
             logger.warning(f"  ⚠️ 無法從 source 取得 {table_name} 的欄位資訊，將由 pandas 自動建立結構")
             return False
 
-        col_defs = []
-        for col_name, type_name, type_params, is_nullable in rows:
-            col_type = f"{type_name}({type_params})" if type_params else type_name
-            null_clause = "NULL" if is_nullable else "NOT NULL"
-            safe_col = col_name.replace("]", "]]")
-            col_defs.append(f"    [{safe_col}] {col_type} {null_clause}")
-
-        create_ddl = f"CREATE TABLE [{safe_id}] (\n" + ",\n".join(col_defs) + "\n)"
+        create_ddl = build_create_table_ddl(table_name, rows)
         drop_ddl   = f"IF OBJECT_ID('{safe_str}', 'U') IS NOT NULL DROP TABLE [{safe_id}]"
 
         try:
             with tgt_engine.begin() as conn:
                 conn.exec_driver_sql(drop_ddl)
                 conn.exec_driver_sql(create_ddl)
-            logger.info(f"  ✅ 已依 source schema 建立 [{table_name}]（{len(col_defs)} 欄）")
+            logger.info(f"  ✅ 已依 source schema 建立 [{table_name}]（{len(rows)} 欄）")
             return True
         except Exception as drop_err:
             logger.warning(f"  ⚠️ 無法重建 {table_name}（{drop_err}），改用 TRUNCATE 保留現有 schema")
             try:
                 with tgt_engine.begin() as conn:
-                    conn.exec_driver_sql(f"TRUNCATE TABLE [{table_name}]")
+                    conn.exec_driver_sql(f"TRUNCATE TABLE [{safe_id}]")
                 logger.info(f"  ✅ 已 TRUNCATE [{table_name}]，將複製數值")
+                _report_schema_diff(src_engine, tgt_engine, table_name, mismatches)
                 return True
             except Exception as trunc_err:
                 logger.warning(f"  ⚠️ TRUNCATE {table_name} 失敗：{trunc_err}，將由 pandas 自動建立結構")
+                _report_schema_diff(src_engine, tgt_engine, table_name, mismatches)
                 return False
 
     except Exception as e:
         logger.warning(f"  ⚠️ 預建 {table_name} schema 失敗：{e}，將由 pandas 自動建立結構")
         return False
+
+
+_COLLATION_QUERY = """
+    SELECT CAST(DATABASEPROPERTYEX(DB_NAME(), 'Collation') AS nvarchar(128)),
+           CAST(SERVERPROPERTY('Collation') AS nvarchar(128))
+"""
+
+
+def fetch_collations(engine) -> tuple:
+    """回傳 (資料庫預設 collation, 伺服器預設 collation)。"""
+    with engine.connect() as conn:
+        db_coll, server_coll = conn.exec_driver_sql(_COLLATION_QUERY).fetchone()
+    return db_coll, server_coll
+
+
+def check_collations(src_engine, tgt_engine) -> List[str]:
+    """
+    比對 source／target 的資料庫預設 collation，回傳「必須中止」的問題清單。
+
+    本工具不建 target 資料庫，target 是使用者事先建好的。逐欄 COLLATE 只能保住資料表欄位；
+    資料庫預設 collation 還決定 SP／View 裡沒加 N 前綴的中文常值怎麼解讀，不一致就會變 ???，
+    所以列為中止條件。target 伺服器預設 collation（= tempdb，#temp 表的 varchar 用它）
+    跟 source 伺服器不一致只記警告：要換得重建容器（MSSQL_COLLATION），不是這裡修得了的。
+    （伺服器與資料庫可以不同，例如 UAT 是伺服器 CI_AS、資料庫 BIN，所以伺服器只跟伺服器比。）
+    """
+    src_db, src_server = fetch_collations(src_engine)
+    tgt_db, tgt_server = fetch_collations(tgt_engine)
+    logger.info(f"Collation：source DB = {src_db}，server = {src_server}；"
+                f"target DB = {tgt_db}，server = {tgt_server}")
+
+    if tgt_server and src_server and tgt_server.lower() != src_server.lower():
+        logger.warning(
+            f"  ⚠️ target 伺服器預設 collation 為 {tgt_server}，與 source 伺服器（{src_server}）不同——"
+            f"SP 裡 #temp 表的 varchar 欄位會用 {tgt_server}，可能出現 ??? 或 Msg 468 collation 衝突。"
+            f"\n     要根治請以 MSSQL_COLLATION={src_server} 重建容器。"
+        )
+
+    if src_db and tgt_db and src_db.lower() != tgt_db.lower():
+        return [
+            f"target 資料庫預設 collation 為 {tgt_db}，source 為 {src_db}。",
+            f"請先以相同 collation 建立 target 資料庫：CREATE DATABASE [<name>] COLLATE {src_db}",
+            f"（既有庫可用 ALTER DATABASE [<name>] COLLATE {src_db}，但不會改動已存在的欄位）",
+        ]
+    return []
 
 
 # ---------------------------------------------------------------------------

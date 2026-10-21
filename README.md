@@ -14,7 +14,7 @@
 - **稽核與追蹤 (Audit & Traceability)**:
   - **日誌記錄 (Logging)**: 自動產生 `YYYYMMDD_Clone.log`，詳實記錄執行過程與 Before/After 樣本。
   - **動態 Salt**: 依據執行日期動態產生混淆種子，確保當日結果一致，不同日結果不同。
-- **Unicode 支援**: 自動偵測 CP950→UTF-8 最大膨脹率（2x）並放寬欄位長度，確保中文資料正確寫入，不再發生截斷錯誤。
+- **中文與 collation 保留**: 字串欄位逐欄沿用來源 collation，讀取時在來源端轉成 nvarchar，中文 varchar 位元組原樣落地；欄位長度照抄來源，不再放寬。
 - **高效傳輸**: 支援分批次 (Batch) 讀取與寫入，並顯示進度條。
 - **無人值守部署 (Headless Mode)**: 支援讀取 Deploy Profile JSON，透過 CLI 實現自動化批次執行，無需人工干預 TUI。
 - **Retry Script**: 複製結束後自動輸出 `YYYYMMDD_Clone_Retry.sql`，將因 Linked Server 等環境因素失敗的 DDL 整理為可重執行腳本，方便事後補建。
@@ -129,6 +129,28 @@ python db_replicator.py
    - `Ctrl+O` 返回專案 / `S` 儲存 / `X` 匯出設定檔 / `G` 開始複製 / `Q` 離開
 
 3. **執行複製** — 批次讀取、去敏化、寫入目標資料庫
+
+### 建立目標資料庫：collation 必須與來源相同
+
+本工具**不會建立目標資料庫**。請事先手動建好，而且建庫時要指定與來源相同的 collation。以 HRM UAT（172.22.1.130/hrm_test）為例，伺服器是 `Chinese_Taiwan_Stroke_CI_AS`，資料庫是 `Chinese_Taiwan_Stroke_BIN`：
+
+```sql
+-- 先在來源查兩層 collation
+SELECT DATABASEPROPERTYEX(DB_NAME(), 'Collation'), SERVERPROPERTY('Collation');
+
+-- 在目標端建庫：資料庫層要跟來源資料庫一致
+CREATE DATABASE [hrm_dev] COLLATE Chinese_Taiwan_Stroke_BIN;
+```
+
+```bash
+# 容器：伺服器層跟來源伺服器一致（tempdb 也跟著伺服器走）
+docker run -e ACCEPT_EULA=Y -e MSSQL_COLLATION=Chinese_Taiwan_Stroke_CI_AS ... mcr.microsoft.com/mssql/server
+```
+
+- 開始複製前會比對兩邊資料庫的 collation，**不一致就中止**。確定要繼續可加 `--allow-collation-mismatch`。兩邊伺服器的 collation 不同只會警告，不會中止。
+- `_BIN` 會區分大小寫、全形與半形、重音，比對時是逐位元組比。測試庫如果用 `_CI_AS`，會掩蓋 SQL 裡大小寫不一致、或全半形混用的問題，上了 UAT 才會出錯。所以資料庫層務必用跟來源一樣的 `_BIN`。
+- 資料表的字串欄位一律依來源逐欄寫出 `COLLATE`，就算資料庫預設值不同，欄位本身還是正確的；但 SP／View 裡沒加 `N` 前綴的中文常值是依**資料庫**預設 collation 解讀，SP 裡 `#temp` 表的 varchar 則依**伺服器**（tempdb）collation。
+- 讀取 char／varchar／text 時，會在來源端 `CAST` 成 nvarchar 再搬。原因是 pymssql 內建的 FreeTDS 不看欄位 collation，會把 varchar 一律當 Latin1 解碼。詳見 RELEASE_NOTES。
 
 ### Demo 模式
 模擬複製過程而不實際連接資料庫：

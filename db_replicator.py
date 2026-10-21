@@ -88,6 +88,9 @@ from config_manager import config_mgr
 
 from clone_engine import (
     create_target_table_from_source,
+    check_collations,
+    fetch_column_defs,
+    build_select_list,
     clone_views,
     clone_sps_and_functions,
     clone_triggers,
@@ -228,7 +231,24 @@ def profile_to_payload(profile: dict) -> dict:
 # Core replication logic
 # ---------------------------------------------------------------------------
 
-def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
+def _text_dtype_map(chunk):
+    """
+    只把「真的是字串」的欄位宣告成 NVARCHAR（解決中文編碼問題）。
+
+    read_sql 用 coerce_float=False 之後，decimal 欄位會以 decimal.Decimal 物件
+    留在 object dtype 裡，不能再把整個 object dtype 當成文字看待。
+    此 map 只在 pandas 需要自行建表時生效（預建 schema 失敗的退路）。
+    """
+    dtype_map = {}
+    for col in chunk.select_dtypes(include=['object', 'str']).columns:
+        sample = chunk[col].dropna()
+        if sample.empty or isinstance(sample.iloc[0], str):
+            dtype_map[col] = NVARCHAR
+    return dtype_map
+
+
+def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db,
+                         allow_collation_mismatch=False):
     selected_tables   = list(payload.get("tables",    []))
     selected_views    = list(payload.get("views",     []))
     selected_funcs    = list(payload.get("functions", []))
@@ -237,6 +257,23 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
 
     logger.info("\n準備開始複製...\n")
 
+    if source_engine and target_engine:
+        try:
+            collation_issues = check_collations(source_engine, target_engine)
+        except Exception as e:
+            collation_issues = []
+            logger.warning(f"⚠️ 無法比對 source／target collation：{e}")
+        if collation_issues:
+            log = logger.warning if allow_collation_mismatch else logger.error
+            log("🚨 source／target collation 不一致：")
+            for issue in collation_issues:
+                log(f"   - {issue}")
+            if not allow_collation_mismatch:
+                logger.error("   已中止複製。確定要繼續請加 --allow-collation-mismatch。")
+                return
+
+    schema_mismatches: list = []
+
     # Phase 1: Tables
     for table in selected_tables:
         logger.info(f"處理資料表: {table}")
@@ -244,30 +281,38 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
         where_clause = LARGE_TABLE_FILTERS.get(table)
         if where_clause:
             logger.info(f"  -> 套用篩選條件: {where_clause}")
-            query = f"SELECT * FROM {table} WHERE {where_clause}"
+            from_clause = f"FROM {table} WHERE {where_clause}"
             count_where = re.split(r'\s+ORDER\s+BY\s+', where_clause, flags=re.IGNORECASE)[0]
             count_query = f"SELECT COUNT(*) FROM {table} WHERE {count_where}"
         else:
-            query       = f"SELECT * FROM {table}"
+            from_clause = f"FROM {table}"
             count_query = f"SELECT COUNT(*) FROM {table}"
 
         try:
             if source_engine and target_engine:
-                schema_ok = create_target_table_from_source(source_engine, target_engine, table)
+                schema_ok = create_target_table_from_source(source_engine, target_engine, table,
+                                                           mismatches=schema_mismatches)
                 if not schema_ok:
                     logger.warning(
                         f"  🚨 [{table}] DROP 與 TRUNCATE 均失敗 — 將直接 APPEND 至現有資料表！"
                         f"\n     ⚠️  若表中已有資料，本次複製將造成資料重複累加（Double Data）。"
+                        f"\n     ⚠️  若 target 尚無此表，將由 pandas 依 DataFrame 推導型別建表，"
+                        f"decimal / varbinary 會被建成文字欄位。"
                         f"\n     請手動確認 target [{table}] 是否需要先清空。"
                     )
                 with source_engine.connect() as conn:
                     total_count = conn.exec_driver_sql(count_query).scalar()
 
+                query = f"SELECT {build_select_list(fetch_column_defs(source_engine, table))} {from_clause}"
+
                 chunk_size = 5000
                 with tqdm(total=total_count, desc=f"Copying {table}", unit="rows") as pbar:
-                    for chunk in pd.read_sql(query, source_engine, chunksize=chunk_size):
-                        chunk    = apply_anonymization(chunk, table)
-                        dtype_map = {c: NVARCHAR for c in chunk.select_dtypes(include=['object', 'str']).columns}
+                    # coerce_float=False：預設的 True 會把 decimal.Decimal 轉成 float64，
+                    # 有效位數超過 ~15 位的欄位（如 decimal(38,10)）會在傳輸途中被四捨五入。
+                    for chunk in pd.read_sql(query, source_engine, chunksize=chunk_size,
+                                             coerce_float=False):
+                        chunk     = apply_anonymization(chunk, table)
+                        dtype_map = _text_dtype_map(chunk)
                         chunk.to_sql(table, target_engine, if_exists='append', index=False, dtype=dtype_map)
                         pbar.update(len(chunk))
             else:
@@ -301,6 +346,19 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db):
         write_retry_script(retry_items, src_db, tgt_db)
     else:
         logger.info("Demo 模式：略過 View / SP / Function / Trigger 的實際複製")
+
+    if schema_mismatches:
+        logger.error(
+            "\n🚨 以下資料表沿用了 target 既有結構，資料已寫入但欄位型別、DEFAULT 或 COLLATE 與 source 不符："
+        )
+        for item in schema_mismatches:
+            logger.error(f"   - {item}")
+        logger.error(
+            "   （v1.3.0 之前的版本由 pandas 推導建表，decimal 會變成 FLOAT；2026-09-23 之前建的表\n"
+            "    沒有 DEFAULT 約束，2026-10-20 之前建的表字串欄位沒帶來源 COLLATE——都是 TRUNCATE 洗不掉的）\n"
+            "   請先排除 DROP 失敗的原因（多半是 FK 或 schema binding），"
+            "手動 DROP 這些 target 資料表後重跑。\n"
+        )
 
     logger.info("\n所有作業完成！")
 
@@ -362,6 +420,8 @@ def run_ddl_backup(args) -> int:
 
 
 def run_replication(args=None):
+    allow_collation_mismatch = bool(args and getattr(args, 'allow_collation_mismatch', False))
+
     # --- Headless path ---
     if args and args.deploy_profile:
         logger.info(f"🚀 Headless 模式：載入設定檔 {args.deploy_profile}")
@@ -389,7 +449,8 @@ def run_replication(args=None):
             logger.info(f"ℹ️ 未找到專案 '{proj_name}'，使用預設姓名資料")
             initialize_name_data(source_engine)
 
-        _execute_replication(payload, source_engine, target_engine, src_db, tgt_db)
+        _execute_replication(payload, source_engine, target_engine, src_db, tgt_db,
+                             allow_collation_mismatch=allow_collation_mismatch)
         logger.info("🏁 Headless 部署完成")
         return
 
@@ -474,7 +535,8 @@ def run_replication(args=None):
         SENSITIVE_COLUMNS   = pii_rules
         LARGE_TABLE_FILTERS = filters
 
-        _execute_replication(payload, source_engine, target_engine, src_db, tgt_db)
+        _execute_replication(payload, source_engine, target_engine, src_db, tgt_db,
+                             allow_collation_mismatch=allow_collation_mismatch)
         input("\n請按 Enter 鍵返回首頁...")
 
 
@@ -497,6 +559,9 @@ if __name__ == "__main__":
                         help="僅列出會新增/更新/刪除的檔案，不實際寫入")
     parser.add_argument("--allow-dirty", action="store_true",
                         help="備份目錄有未提交變更時仍強制執行")
+
+    parser.add_argument("--allow-collation-mismatch", action="store_true",
+                        help="target 資料庫 collation 與 source 不同時仍繼續複製（預設中止）")
 
     parser.add_argument("--src-server",   help="Source Database Server IP/Hostname")
     parser.add_argument("--src-database", help="Source Database Name")
