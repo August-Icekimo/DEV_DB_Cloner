@@ -91,6 +91,7 @@ from clone_engine import (
     check_collations,
     fetch_column_defs,
     build_select_list,
+    identity_insert,
     clone_views,
     clone_sps_and_functions,
     clone_triggers,
@@ -306,14 +307,17 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db,
                 query = f"SELECT {build_select_list(fetch_column_defs(source_engine, table))} {from_clause}"
 
                 chunk_size = 5000
-                with tqdm(total=total_count, desc=f"Copying {table}", unit="rows") as pbar:
+                with tqdm(total=total_count, desc=f"Copying {table}", unit="rows") as pbar, \
+                     identity_insert(target_engine, table) as tgt_conn:
                     # coerce_float=False：預設的 True 會把 decimal.Decimal 轉成 float64，
                     # 有效位數超過 ~15 位的欄位（如 decimal(38,10)）會在傳輸途中被四捨五入。
                     for chunk in pd.read_sql(query, source_engine, chunksize=chunk_size,
                                              coerce_float=False):
                         chunk     = apply_anonymization(chunk, table)
                         dtype_map = _text_dtype_map(chunk)
-                        chunk.to_sql(table, target_engine, if_exists='append', index=False, dtype=dtype_map)
+                        # 寫入必須走 tgt_conn：IDENTITY_INSERT 只在那條連線上是 ON
+                        chunk.to_sql(table, tgt_conn, if_exists='append', index=False, dtype=dtype_map)
+                        tgt_conn.commit()
                         pbar.update(len(chunk))
             else:
                 total_rows = 15000
@@ -349,13 +353,15 @@ def _execute_replication(payload, source_engine, target_engine, src_db, tgt_db,
 
     if schema_mismatches:
         logger.error(
-            "\n🚨 以下資料表沿用了 target 既有結構，資料已寫入但欄位型別、DEFAULT 或 COLLATE 與 source 不符："
+            "\n🚨 以下資料表沿用了 target 既有結構，資料已寫入但欄位型別、DEFAULT、COLLATE 或 IDENTITY 與 source 不符："
         )
         for item in schema_mismatches:
             logger.error(f"   - {item}")
         logger.error(
             "   （v1.3.0 之前的版本由 pandas 推導建表，decimal 會變成 FLOAT；2026-09-23 之前建的表\n"
-            "    沒有 DEFAULT 約束，2026-10-20 之前建的表字串欄位沒帶來源 COLLATE——都是 TRUNCATE 洗不掉的）\n"
+            "    沒有 DEFAULT 約束，2026-10-20 之前建的表字串欄位沒帶來源 COLLATE，\n"
+            "    2026-10-21 之前建的表沒有 IDENTITY——都是 TRUNCATE 洗不掉的；缺 IDENTITY 可先用\n"
+            "    gen_identity_sequences.sql 以 SEQUENCE + DEFAULT 補上自動編號）\n"
             "   請先排除 DROP 失敗的原因（多半是 FK 或 schema binding），"
             "手動 DROP 這些 target 資料表後重跑。\n"
         )
